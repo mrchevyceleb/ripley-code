@@ -977,7 +977,8 @@ async function handleCommands(commands) {
 
   if (shouldRun) {
     for (const cmd of commands) {
-      console.log(`\n${c.cyan}  Running: ${cmd}${c.reset}\n`);
+      console.log(`\n${c.cyan}  ┌─ Running: ${cmd}${c.reset}`);
+      console.log(`${c.cyan}  │${c.reset}`);
 
       if (commandRunner.isDangerous(cmd)) {
         const confirm = await askQuestion(`${c.red}  ⚠️  This looks dangerous. Type 'yes' to confirm: ${c.reset}`);
@@ -987,14 +988,73 @@ async function handleCommands(commands) {
         }
       }
 
+      // Track elapsed time
+      const startTime = Date.now();
+      let lastOutputTime = Date.now();
+      let lineCount = 0;
+
+      // Spinner for periods of no output
+      const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+      let frameIndex = 0;
+      let spinnerInterval = null;
+
+      const startSpinner = () => {
+        if (spinnerInterval) return;
+        spinnerInterval = setInterval(() => {
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+          process.stdout.write(`\r${c.cyan}  │ ${c.dim}${frames[frameIndex]} Working... (${elapsed}s)${c.reset}    `);
+          frameIndex = (frameIndex + 1) % frames.length;
+        }, 80);
+      };
+
+      const stopSpinner = () => {
+        if (spinnerInterval) {
+          clearInterval(spinnerInterval);
+          spinnerInterval = null;
+          process.stdout.write('\r' + ' '.repeat(50) + '\r');
+        }
+      };
+
       try {
         const result = await commandRunner.run(cmd, {
-          onStdout: data => process.stdout.write(data),
-          onStderr: data => process.stderr.write(data)
+          onStdout: data => {
+            stopSpinner();
+            lastOutputTime = Date.now();
+            const lines = data.toString().split('\n');
+            lines.forEach(line => {
+              if (line.trim()) {
+                lineCount++;
+                console.log(`${c.cyan}  │${c.reset} ${line}`);
+              }
+            });
+            // Restart spinner if no output for a while
+            setTimeout(() => {
+              if (Date.now() - lastOutputTime > 2000) startSpinner();
+            }, 2000);
+          },
+          onStderr: data => {
+            stopSpinner();
+            lastOutputTime = Date.now();
+            const lines = data.toString().split('\n');
+            lines.forEach(line => {
+              if (line.trim()) {
+                console.log(`${c.cyan}  │${c.reset} ${c.yellow}${line}${c.reset}`);
+              }
+            });
+          }
         });
-        console.log(`\n${result.success ? c.green : c.red}  Exit code: ${result.code}${c.reset}`);
+
+        stopSpinner();
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`${c.cyan}  │${c.reset}`);
+        if (result.success) {
+          console.log(`${c.cyan}  └─${c.reset} ${c.green}✓ Done${c.reset} ${c.dim}(${elapsed}s)${c.reset}`);
+        } else {
+          console.log(`${c.cyan}  └─${c.reset} ${c.red}✗ Failed (exit code ${result.code})${c.reset} ${c.dim}(${elapsed}s)${c.reset}`);
+        }
       } catch (error) {
-        console.log(`\n${c.red}  Error: ${error.message}${c.reset}`);
+        stopSpinner();
+        console.log(`${c.cyan}  └─${c.reset} ${c.red}✗ Error: ${error.message}${c.reset}`);
       }
     }
     console.log();
