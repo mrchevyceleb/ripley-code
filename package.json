@@ -1,0 +1,22 @@
+{
+  "name": "ripley-code",
+  "version": "2.0.0",
+  "description": "Ripley Code - Your local AI coding agent",
+  "main": "ripley.js",
+  "bin": {
+    "ripley": "./ripley.js"
+  },
+  "scripts": {
+    "start": "node ripley.js",
+    "dev": "node ripley.js"
+  },
+  "keywords": ["ai", "cli", "coding", "agent", "assistant"],
+  "author": "Matt",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "diff": "^5.1.0",
+    "ignore": "^5.3.0",
+    "glob": "^10.3.0"
+  }
+}
