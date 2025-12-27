@@ -876,8 +876,9 @@ async function processAIResponse(reply, originalMessage) {
   }
 
   // Handle commands
+  let commandsExecuted = false;
   if (parsed.commands.length > 0) {
-    await handleCommands(parsed.commands);
+    commandsExecuted = await handleCommands(parsed.commands);
   }
 
   // Update conversation history
@@ -888,6 +889,21 @@ async function processAIResponse(reply, originalMessage) {
   const historyLimit = config.get('historyLimit') || 50;
   if (conversationHistory.length > historyLimit) {
     conversationHistory = conversationHistory.slice(-historyLimit);
+  }
+
+  // Auto-continue: If we ran scaffolding commands but got no file operations,
+  // the AI probably needs to continue building
+  if (commandsExecuted && parsed.fileOperations.length === 0) {
+    const hasScaffoldingCmd = parsed.commands.some(cmd =>
+      /create-(next|react|vue|vite|nuxt)-app/i.test(cmd) ||
+      /npx\s+shadcn/i.test(cmd)
+    );
+
+    if (hasScaffoldingCmd) {
+      console.log(`${c.yellow}  ⚠ Scaffolding completed but no feature code was generated.${c.reset}`);
+      console.log(`${c.dim}    The AI should have included the actual app code in its response.${c.reset}`);
+      console.log(`${c.dim}    Try asking again with more specific requirements.${c.reset}\n`);
+    }
   }
 }
 
@@ -1031,6 +1047,11 @@ async function handleCommands(commands) {
     shouldRun = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
   }
 
+  if (!shouldRun) {
+    console.log(`${c.yellow}  Commands not executed${c.reset}\n`);
+    return false;
+  }
+
   if (shouldRun) {
     // Track working directory for cd commands
     let currentCwd = commandRunner.projectDir;
@@ -1137,9 +1158,9 @@ async function handleCommands(commands) {
       }
     }
     console.log();
-  } else {
-    console.log(`${c.yellow}  Commands not executed${c.reset}\n`);
   }
+
+  return true;
 }
 
 function askQuestion(prompt) {

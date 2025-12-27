@@ -88,3 +88,5 @@ Run `node ripley.js` in any project directory
 - `diff` - File diffing
 - `ignore` - .gitignore parsing
 - `glob` - File pattern matching
+- i use windows powershell
+- always let me know if i need to re-pull the cli from github on other computers to pick up changes
