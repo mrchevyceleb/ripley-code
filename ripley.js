@@ -109,6 +109,7 @@ ${c.yellow}  /set <key> <value>${c.reset}  Update config setting
 ${c.yellow}  /instructions${c.reset}       Edit project instructions
 ${c.yellow}  /watch${c.reset}              Toggle file watch mode
 ${c.yellow}  /stream${c.reset}             Toggle streaming mode
+${c.yellow}  /yolo${c.reset}               Toggle YOLO mode (auto-apply all changes)
 
 ${c.orange}${c.dim}System Commands:${c.reset}
 ${c.yellow}  /run <cmd>${c.reset}          Run a shell command
@@ -572,6 +573,19 @@ async function handleCommand(input) {
       }
       return true;
 
+    case '/yolo':
+      const newYolo = !config.get('yoloMode');
+      config.set('yoloMode', newYolo);
+      if (newYolo) {
+        console.log(`\n${c.orange}  🔥 YOLO MODE: ON${c.reset}`);
+        console.log(`${c.dim}    File changes and commands will be applied automatically without confirmation.${c.reset}`);
+        console.log(`${c.dim}    Dangerous commands still require typing 'yes'.${c.reset}\n`);
+      } else {
+        console.log(`\n${c.green}  ✓ YOLO mode: OFF${c.reset}`);
+        console.log(`${c.dim}    Back to normal confirmation prompts.${c.reset}\n`);
+      }
+      return true;
+
     case '/config':
       const allConfig = config.getAll();
       console.log(`\n${c.cyan}  Configuration:${c.reset}`);
@@ -881,10 +895,18 @@ async function handleFileOperations(operations) {
   // Show batched diff view
   console.log(formatOperationsBatch(operations, fileManager));
 
-  // Ask for confirmation
-  const answer = await askQuestion(`${c.yellow}Apply these changes? (y/n/v for verbose): ${c.reset}`);
+  // Check for YOLO mode - auto-apply without confirmation
+  const yoloMode = config.get('yoloMode');
+  let response;
 
-  const response = answer.toLowerCase().trim();
+  if (yoloMode) {
+    console.log(`${c.orange}  🔥 YOLO: Auto-applying changes...${c.reset}\n`);
+    response = 'y';
+  } else {
+    // Ask for confirmation
+    const answer = await askQuestion(`${c.yellow}Apply these changes? (y/n/v for verbose): ${c.reset}`);
+    response = answer.toLowerCase().trim();
+  }
 
   if (response === 'y' || response === 'yes') {
     for (const op of operations) {
@@ -941,9 +963,19 @@ async function handleCommands(commands) {
   }
   console.log();
 
-  const answer = await askQuestion(`${c.yellow}Run these commands? (y/n): ${c.reset}`);
+  // Check for YOLO mode - auto-run without confirmation
+  const yoloMode = config.get('yoloMode');
+  let shouldRun;
 
-  if (answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes') {
+  if (yoloMode) {
+    console.log(`${c.orange}  🔥 YOLO: Auto-running commands...${c.reset}\n`);
+    shouldRun = true;
+  } else {
+    const answer = await askQuestion(`${c.yellow}Run these commands? (y/n): ${c.reset}`);
+    shouldRun = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
+  }
+
+  if (shouldRun) {
     for (const cmd of commands) {
       console.log(`\n${c.cyan}  Running: ${cmd}${c.reset}\n`);
 
