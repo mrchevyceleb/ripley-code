@@ -955,10 +955,66 @@ async function handleFileOperations(operations) {
   }
 }
 
+/**
+ * Pre-process commands to handle directory context
+ * - Detects create-next-app/create-react-app and adds cd command
+ * - Chains dependent commands properly
+ */
+function preprocessCommands(commands) {
+  const processed = [];
+  let projectDir = null;
+
+  for (let i = 0; i < commands.length; i++) {
+    const cmd = commands[i].trim();
+
+    // Detect project creation commands that create a subdirectory
+    const createAppMatch = cmd.match(/npx\s+create-(?:next|react|vue|vite|nuxt)-app(?:@\S+)?\s+(\S+)/i);
+    const mkdirMatch = cmd.match(/^mkdir\s+(\S+)/);
+
+    if (createAppMatch) {
+      projectDir = createAppMatch[1];
+      processed.push(cmd);
+      // If next command doesn't start with cd and needs to run in project dir
+      const nextCmd = commands[i + 1];
+      if (nextCmd && !nextCmd.trim().startsWith('cd ') && needsProjectDir(nextCmd)) {
+        processed.push(`cd ${projectDir}`);
+      }
+    } else if (mkdirMatch && commands[i + 1]?.includes('cd')) {
+      // mkdir followed by cd - keep as is
+      processed.push(cmd);
+    } else if (cmd.startsWith('cd ')) {
+      // Track directory changes
+      const cdMatch = cmd.match(/^cd\s+(\S+)/);
+      if (cdMatch) projectDir = cdMatch[1];
+      processed.push(cmd);
+    } else {
+      processed.push(cmd);
+    }
+  }
+
+  return processed;
+}
+
+/**
+ * Check if a command needs to run in a project directory
+ */
+function needsProjectDir(cmd) {
+  const projectCommands = [
+    /^npm\s+(run|install|start|test|build)/i,
+    /^npx\s+shadcn/i,
+    /^yarn\s+(run|add|start|test|build)?/i,
+    /^pnpm\s+(run|add|start|test|build)?/i,
+  ];
+  return projectCommands.some(pattern => pattern.test(cmd.trim()));
+}
+
 async function handleCommands(commands) {
+  // Pre-process commands to handle directory changes
+  const processedCommands = preprocessCommands(commands);
+
   console.log(`${c.orange}🔧 Suggested Commands:${c.reset}\n`);
 
-  for (const cmd of commands) {
+  for (const cmd of processedCommands) {
     console.log(`${c.dim}  $ ${cmd}${c.reset}`);
   }
   console.log();
@@ -976,7 +1032,29 @@ async function handleCommands(commands) {
   }
 
   if (shouldRun) {
-    for (const cmd of commands) {
+    // Track working directory for cd commands
+    let currentCwd = commandRunner.projectDir;
+
+    for (const cmd of processedCommands) {
+      // Handle cd commands specially - just change the working directory
+      const cdMatch = cmd.match(/^cd\s+(.+)$/);
+      if (cdMatch) {
+        const targetDir = cdMatch[1].trim();
+        const newCwd = path.isAbsolute(targetDir)
+          ? targetDir
+          : path.join(currentCwd, targetDir);
+
+        if (fs.existsSync(newCwd)) {
+          currentCwd = newCwd;
+          console.log(`\n${c.cyan}  ┌─ ${cmd}${c.reset}`);
+          console.log(`${c.cyan}  └─${c.reset} ${c.green}✓ Changed directory to ${newCwd}${c.reset}`);
+        } else {
+          console.log(`\n${c.cyan}  ┌─ ${cmd}${c.reset}`);
+          console.log(`${c.cyan}  └─${c.reset} ${c.red}✗ Directory not found: ${newCwd}${c.reset}`);
+        }
+        continue;
+      }
+
       console.log(`\n${c.cyan}  ┌─ Running: ${cmd}${c.reset}`);
       console.log(`${c.cyan}  │${c.reset}`);
 
@@ -1017,6 +1095,7 @@ async function handleCommands(commands) {
 
       try {
         const result = await commandRunner.run(cmd, {
+          cwd: currentCwd,
           onStdout: data => {
             stopSpinner();
             lastOutputTime = Date.now();
