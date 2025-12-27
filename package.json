@@ -1,7 +1,7 @@
 {
   "name": "ripley-code",
-  "version": "2.0.0",
-  "description": "Ripley Code - Your local AI coding agent",
+  "version": "3.0.0",
+  "description": "Ripley Code - Your local AI coding agent with streaming, history, and more",
   "main": "ripley.js",
   "bin": {
     "ripley": "./ripley.js"
