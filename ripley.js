@@ -29,6 +29,7 @@ const Completer = require('./lib/completer');
 const TokenCounter = require('./lib/tokenCounter');
 const Watcher = require('./lib/watcher');
 const ImageHandler = require('./lib/imageHandler');
+const VisionAnalyzer = require('./lib/visionAnalyzer');
 const { StreamHandler } = require('./lib/streamHandler');
 const { parseResponse } = require('./lib/parser');
 const { formatOperationsBatch, formatCompactSummary, colors: c } = require('./lib/diffViewer');
@@ -37,7 +38,7 @@ const { formatOperationsBatch, formatCompactSummary, colors: c } = require('./li
 // CONFIGURATION
 // =============================================================================
 
-const VERSION = '3.0.0';
+const VERSION = '3.1.0';
 
 // =============================================================================
 // GLOBALS
@@ -53,8 +54,12 @@ let completer = null;
 let tokenCounter = null;
 let watcher = null;
 let imageHandler = null;
+let visionAnalyzer = null;
 let conversationHistory = [];
 let rl = null;
+
+// Interaction modes: 'code' (default), 'plan' (preview only), 'ask' (no operations)
+let interactionMode = 'code';
 
 // =============================================================================
 // ASCII ART & UI
@@ -86,7 +91,7 @@ ${c.yellow}  /unread <path>${c.reset}      Remove file from context
 ${c.yellow}  /tree${c.reset}               Show project structure
 ${c.yellow}  /find <pattern>${c.reset}     Find files matching pattern
 ${c.yellow}  /grep <text>${c.reset}        Search for text in files
-${c.yellow}  /image <path>${c.reset}       Add image for vision models
+${c.yellow}  /image <path>${c.reset}       Add image (auto-analyzed with Gemini)
 
 ${c.orange}${c.dim}Git Commands:${c.reset}
 ${c.yellow}  /git${c.reset}                Show git status
@@ -103,13 +108,18 @@ ${c.yellow}  /context${c.reset}            Show context size & tokens
 ${c.yellow}  /tokens${c.reset}             Show token usage this session
 ${c.yellow}  /compact${c.reset}            Toggle compact mode
 
+${c.orange}${c.dim}Modes:${c.reset}
+${c.yellow}  /plan${c.reset}               Toggle PLAN mode (preview changes only)
+${c.yellow}  /ask${c.reset}                Toggle ASK mode (questions only, no file ops)
+${c.yellow}  /mode${c.reset}               Show current mode
+${c.yellow}  /yolo${c.reset}               Toggle YOLO mode (auto-apply all changes)
+
 ${c.orange}${c.dim}Config Commands:${c.reset}
 ${c.yellow}  /config${c.reset}             Show current config
 ${c.yellow}  /set <key> <value>${c.reset}  Update config setting
 ${c.yellow}  /instructions${c.reset}       Edit project instructions
 ${c.yellow}  /watch${c.reset}              Toggle file watch mode
 ${c.yellow}  /stream${c.reset}             Toggle streaming mode
-${c.yellow}  /yolo${c.reset}               Toggle YOLO mode (auto-apply all changes)
 
 ${c.orange}${c.dim}System Commands:${c.reset}
 ${c.yellow}  /run <cmd>${c.reset}          Run a shell command
@@ -122,6 +132,7 @@ ${c.orange}${c.dim}Tips:${c.reset}
 ${c.gray}  • Use ${c.cyan}@filename${c.gray} in messages to auto-load files
 ${c.gray}  • Press ${c.cyan}↑${c.gray}/${c.cyan}↓${c.gray} to navigate command history
 ${c.gray}  • Press ${c.cyan}Tab${c.gray} for completion
+${c.gray}  • Press ${c.cyan}Shift+Tab${c.gray} to cycle modes (code → plan → ask)
 ${c.gray}  • Create ${c.cyan}.ripley/instructions.md${c.gray} for project-specific AI instructions
 ${c.reset}
 `);
@@ -141,6 +152,7 @@ function initProject() {
   completer = new Completer(projectDir, contextBuilder);
   tokenCounter = new TokenCounter(config);
   imageHandler = new ImageHandler(projectDir);
+  visionAnalyzer = new VisionAnalyzer({ apiKey: config.get('geminiApiKey') || process.env.GEMINI_API_KEY });
 
   // Initialize watcher (but don't start yet)
   watcher = new Watcher(projectDir, contextBuilder, {
@@ -166,6 +178,13 @@ function initProject() {
   const instructions = config.getInstructions();
   if (instructions) {
     console.log(`${c.green}  ✓${c.reset} Project instructions loaded`);
+  }
+
+  // Check for vision analyzer
+  if (visionAnalyzer.isEnabled()) {
+    console.log(`${c.green}  ✓${c.reset} Vision analysis enabled (Gemini)`);
+  } else {
+    console.log(`${c.dim}  ○ Vision analysis disabled (set GEMINI_API_KEY to enable)${c.reset}`);
   }
 }
 
@@ -586,6 +605,41 @@ async function handleCommand(input) {
       }
       return true;
 
+    case '/plan':
+      if (interactionMode === 'plan') {
+        interactionMode = 'code';
+        console.log(`\n${c.green}  ✓ Switched to CODE mode${c.reset}`);
+        console.log(`${c.dim}    File operations and commands will be executed normally.${c.reset}\n`);
+      } else {
+        interactionMode = 'plan';
+        console.log(`\n${c.cyan}  📋 PLAN MODE: ON${c.reset}`);
+        console.log(`${c.dim}    AI will generate plans but NO file changes or commands will be executed.${c.reset}`);
+        console.log(`${c.dim}    Use /plan again to switch back to code mode.${c.reset}\n`);
+      }
+      return true;
+
+    case '/ask':
+      if (interactionMode === 'ask') {
+        interactionMode = 'code';
+        console.log(`\n${c.green}  ✓ Switched to CODE mode${c.reset}`);
+        console.log(`${c.dim}    File operations and commands will be executed normally.${c.reset}\n`);
+      } else {
+        interactionMode = 'ask';
+        console.log(`\n${c.magenta}  💬 ASK MODE: ON${c.reset}`);
+        console.log(`${c.dim}    Question-only mode - AI will answer questions without generating code operations.${c.reset}`);
+        console.log(`${c.dim}    Use /ask again to switch back to code mode.${c.reset}\n`);
+      }
+      return true;
+
+    case '/mode':
+      const modeColors = { code: c.green, plan: c.cyan, ask: c.magenta };
+      const modeIcons = { code: '⚡', plan: '📋', ask: '💬' };
+      console.log(`\n  Current mode: ${modeColors[interactionMode]}${modeIcons[interactionMode]} ${interactionMode.toUpperCase()}${c.reset}`);
+      console.log(`${c.dim}    /plan - Preview changes without executing${c.reset}`);
+      console.log(`${c.dim}    /ask  - Question-only mode (no operations)${c.reset}`);
+      console.log(`${c.dim}    Use /plan or /ask again to return to code mode${c.reset}\n`);
+      return true;
+
     case '/config':
       const allConfig = config.getAll();
       console.log(`\n${c.cyan}  Configuration:${c.reset}`);
@@ -701,10 +755,26 @@ async function sendMessage(message) {
     console.log(`${c.dim}  Loaded: ${loadedFromMentions.join(', ')}${c.reset}`);
   }
 
-  // Check for pending images
+  // Check for pending images and analyze them with vision AI
   const pendingImages = imageHandler.consumePendingImages();
+  let imageAnalysis = '';
+
   if (pendingImages.length > 0) {
     console.log(`${c.dim}  Including ${pendingImages.length} image(s)${c.reset}`);
+
+    // Analyze images with Gemini if available
+    if (visionAnalyzer.isEnabled()) {
+      console.log(`${c.cyan}  🔍 Analyzing image(s) with Gemini...${c.reset}`);
+      const analysis = await visionAnalyzer.analyzeImages(pendingImages, message);
+      if (analysis) {
+        imageAnalysis = visionAnalyzer.formatForPrompt(analysis);
+        console.log(`${c.green}  ✓ Image analysis complete${c.reset}`);
+      } else {
+        console.log(`${c.yellow}  ⚠ Image analysis failed, sending without description${c.reset}`);
+      }
+    } else {
+      console.log(`${c.yellow}  ⚠ No Gemini API key - set GEMINI_API_KEY for image analysis${c.reset}`);
+    }
   }
 
   // Build context
@@ -733,6 +803,11 @@ async function sendMessage(message) {
     fullMessage += `\n\n## Project-Specific Instructions\n\n${instructions}`;
   }
 
+  // Include image analysis if available
+  if (imageAnalysis) {
+    fullMessage += `\n\n## Image Analysis\n\n${imageAnalysis}`;
+  }
+
   fullMessage += `\n\n## User Request\n\n${message}${systemNote}`;
 
   const apiUrl = config.get('apiUrl');
@@ -751,11 +826,13 @@ async function sendMessage(message) {
 }
 
 async function sendStreamingMessage(message, apiUrl, images = []) {
-  console.log(`\n${c.cyan}  ● code${c.reset} ${c.dim}(streaming)${c.reset}\n`);
+  const modeColors = { code: c.cyan, plan: c.cyan, ask: c.magenta };
+  const modeIcons = { code: '●', plan: '📋', ask: '💬' };
+  console.log(`\n${modeColors[interactionMode]}  ${modeIcons[interactionMode]} ${interactionMode}${c.reset} ${c.dim}(streaming)${c.reset}\n`);
 
   const body = {
     message,
-    mode: 'code',
+    mode: interactionMode === 'ask' ? 'base' : 'code', // Use base prompt for ask mode
     conversationHistory
   };
 
@@ -815,16 +892,17 @@ async function sendStreamingMessage(message, apiUrl, images = []) {
 
 async function sendNonStreamingMessage(message, apiUrl, images = []) {
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  const modeColors = { code: c.cyan, plan: c.cyan, ask: c.magenta };
   let i = 0;
   const spinner = setInterval(() => {
-    process.stdout.write(`\r${c.cyan}  ${frames[i]} ${c.dim}Ripley is thinking...${c.reset}`);
+    process.stdout.write(`\r${modeColors[interactionMode]}  ${frames[i]} ${c.dim}Ripley is thinking...${c.reset}`);
     i = (i + 1) % frames.length;
   }, 80);
 
   try {
     const body = {
       message,
-      mode: 'code',
+      mode: interactionMode === 'ask' ? 'base' : 'code', // Use base prompt for ask mode
       conversationHistory
     };
 
@@ -870,15 +948,39 @@ async function processAIResponse(reply, originalMessage) {
   // Parse response
   const parsed = parseResponse(reply);
 
-  // Handle file operations
+  // Handle file operations based on interaction mode
   if (parsed.fileOperations.length > 0) {
-    await handleFileOperations(parsed.fileOperations);
+    if (interactionMode === 'ask') {
+      // Ask mode: Ignore file operations completely
+      console.log(`${c.dim}  (${parsed.fileOperations.length} file operation(s) skipped - ASK mode)${c.reset}\n`);
+    } else if (interactionMode === 'plan') {
+      // Plan mode: Show operations but don't execute
+      console.log(`\n${c.cyan}  📋 PLAN MODE - Preview Only${c.reset}\n`);
+      console.log(formatOperationsBatch(parsed.fileOperations, fileManager));
+      console.log(`${c.cyan}  Use /plan to switch to code mode and apply changes.${c.reset}\n`);
+    } else {
+      // Code mode: Normal execution
+      await handleFileOperations(parsed.fileOperations);
+    }
   }
 
-  // Handle commands
+  // Handle commands based on interaction mode
   let commandsExecuted = false;
   if (parsed.commands.length > 0) {
-    commandsExecuted = await handleCommands(parsed.commands);
+    if (interactionMode === 'ask') {
+      // Ask mode: Ignore commands completely
+      console.log(`${c.dim}  (${parsed.commands.length} command(s) skipped - ASK mode)${c.reset}\n`);
+    } else if (interactionMode === 'plan') {
+      // Plan mode: Show commands but don't execute
+      console.log(`${c.cyan}  📋 Commands that would run:${c.reset}`);
+      parsed.commands.forEach((cmd, i) => {
+        console.log(`${c.dim}    ${i + 1}. ${cmd}${c.reset}`);
+      });
+      console.log();
+    } else {
+      // Code mode: Normal execution
+      commandsExecuted = await handleCommands(parsed.commands);
+    }
   }
 
   // Update conversation history
@@ -1167,7 +1269,7 @@ function createReadlineInterface() {
     terminal: true
   });
 
-  // Handle up/down for history
+  // Handle up/down for history, Shift+Tab for mode cycling
   process.stdin.on('keypress', (char, key) => {
     if (!key) return;
 
@@ -1179,6 +1281,25 @@ function createReadlineInterface() {
       const next = historyManager.down(rl.line);
       rl.write(null, { ctrl: true, name: 'u' }); // Clear line
       rl.write(next);
+    } else if (key.name === 'tab' && key.shift) {
+      // Shift+Tab: Cycle through modes (code -> plan -> ask -> code)
+      const modes = ['code', 'plan', 'ask'];
+      const currentIndex = modes.indexOf(interactionMode);
+      const nextIndex = (currentIndex + 1) % modes.length;
+      interactionMode = modes[nextIndex];
+
+      const modeColors = { code: c.green, plan: c.cyan, ask: c.magenta };
+      const modeIcons = { code: '⚡', plan: '📋', ask: '💬' };
+      const modeDescriptions = {
+        code: 'Execute file operations and commands',
+        plan: 'Preview changes without executing',
+        ask: 'Question-only mode (no operations)'
+      };
+
+      // Move to new line and show mode change
+      process.stdout.write('\n');
+      console.log(`${modeColors[interactionMode]}  ${modeIcons[interactionMode]} Mode: ${interactionMode.toUpperCase()}${c.reset} ${c.dim}- ${modeDescriptions[interactionMode]}${c.reset}`);
+      rl.prompt(true);
     }
   });
 
@@ -1265,8 +1386,17 @@ Examples:
   }
 
   // Interactive mode
+  const getPromptPrefix = () => {
+    const modeIndicators = {
+      code: `${c.green}⚡${c.reset}`,
+      plan: `${c.cyan}📋${c.reset}`,
+      ask: `${c.magenta}💬${c.reset}`
+    };
+    return `${modeIndicators[interactionMode]} ${c.orange}You → ${c.reset}`;
+  };
+
   const prompt = () => {
-    rl.question(`${c.orange}  You → ${c.reset}`, async (input) => {
+    rl.question(getPromptPrefix(), async (input) => {
       const trimmed = input.trim();
 
       if (!trimmed) {
