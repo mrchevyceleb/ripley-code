@@ -33,12 +33,13 @@ const VisionAnalyzer = require('./lib/visionAnalyzer');
 const { StreamHandler } = require('./lib/streamHandler');
 const { parseResponse } = require('./lib/parser');
 const { formatOperationsBatch, formatCompactSummary, colors: c } = require('./lib/diffViewer');
+const { MarkdownRenderer } = require('./lib/markdownRenderer');
 
 // =============================================================================
 // CONFIGURATION
 // =============================================================================
 
-const VERSION = '3.1.0';
+const VERSION = '3.2.0';
 
 // =============================================================================
 // GLOBALS
@@ -60,6 +61,12 @@ let rl = null;
 
 // Interaction modes: 'code' (default), 'plan' (preview only), 'ask' (no operations)
 let interactionMode = 'code';
+
+// Prompt override: null = auto-detect, or 'base', 'landing', 'saas'
+let promptOverride = null;
+
+// Abort controller for cancelling requests with Escape
+let currentAbortController = null;
 
 // =============================================================================
 // ASCII ART & UI
@@ -109,10 +116,12 @@ ${c.yellow}  /tokens${c.reset}             Show token usage this session
 ${c.yellow}  /compact${c.reset}            Toggle compact mode
 
 ${c.orange}${c.dim}Modes:${c.reset}
-${c.yellow}  /plan${c.reset}               Toggle PLAN mode (preview changes only)
+${c.yellow}  /plan${c.reset}               Toggle PLAN mode (creates plan, no code)
+${c.yellow}  /implement${c.reset}          Execute the saved plan
 ${c.yellow}  /ask${c.reset}                Toggle ASK mode (questions only, no file ops)
 ${c.yellow}  /mode${c.reset}               Show current mode
 ${c.yellow}  /yolo${c.reset}               Toggle YOLO mode (auto-apply all changes)
+${c.yellow}  /prompt <type>${c.reset}      Set prompt: base, landing, saas, auto
 
 ${c.orange}${c.dim}Config Commands:${c.reset}
 ${c.yellow}  /config${c.reset}             Show current config
@@ -125,6 +134,7 @@ ${c.orange}${c.dim}System Commands:${c.reset}
 ${c.yellow}  /run <cmd>${c.reset}          Run a shell command
 ${c.yellow}  /undo${c.reset}               Show recent backups
 ${c.yellow}  /restore <path>${c.reset}     Restore file from backup
+${c.yellow}  /version${c.reset}            Show version
 ${c.yellow}  /help${c.reset}               Show this help
 ${c.yellow}  /exit${c.reset}               Exit Ripley
 
@@ -133,6 +143,8 @@ ${c.gray}  • Use ${c.cyan}@filename${c.gray} in messages to auto-load files
 ${c.gray}  • Press ${c.cyan}↑${c.gray}/${c.cyan}↓${c.gray} to navigate command history
 ${c.gray}  • Press ${c.cyan}Tab${c.gray} for completion
 ${c.gray}  • Press ${c.cyan}Shift+Tab${c.gray} to cycle modes (code → plan → ask)
+${c.gray}  • Press ${c.cyan}Alt+V${c.gray} to paste screenshot from clipboard
+${c.gray}  • Press ${c.cyan}Escape${c.gray} to cancel current request
 ${c.gray}  • Create ${c.cyan}.ripley/instructions.md${c.gray} for project-specific AI instructions
 ${c.reset}
 `);
@@ -152,7 +164,21 @@ function initProject() {
   completer = new Completer(projectDir, contextBuilder);
   tokenCounter = new TokenCounter(config);
   imageHandler = new ImageHandler(projectDir);
-  visionAnalyzer = new VisionAnalyzer({ apiKey: config.get('geminiApiKey') || process.env.GEMINI_API_KEY });
+
+  // Try to get Gemini API key from: 1) project config, 2) global config, 3) env var
+  let geminiKey = config.get('geminiApiKey');
+  if (!geminiKey) {
+    // Check global config in Ripley install directory
+    const globalConfigPath = path.join(__dirname, '.ripley', 'config.json');
+    try {
+      if (fs.existsSync(globalConfigPath)) {
+        const globalConfig = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
+        geminiKey = globalConfig.geminiApiKey;
+      }
+    } catch {}
+  }
+  geminiKey = geminiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  visionAnalyzer = new VisionAnalyzer({ apiKey: geminiKey });
 
   // Initialize watcher (but don't start yet)
   watcher = new Watcher(projectDir, contextBuilder, {
@@ -184,7 +210,7 @@ function initProject() {
   if (visionAnalyzer.isEnabled()) {
     console.log(`${c.green}  ✓${c.reset} Vision analysis enabled (Gemini)`);
   } else {
-    console.log(`${c.dim}  ○ Vision analysis disabled (set GEMINI_API_KEY to enable)${c.reset}`);
+    console.log(`${c.dim}  ○ Vision analysis disabled (set GEMINI_API_KEY or GOOGLE_API_KEY)${c.reset}`);
   }
 }
 
@@ -252,6 +278,55 @@ async function loadMentionedFiles(message) {
 }
 
 // =============================================================================
+// WORD WRAP HELPER FOR STREAMING OUTPUT
+// =============================================================================
+
+class StreamingWordWrapper {
+  constructor(maxWidth = null) {
+    // Use terminal width minus some padding, or default to 80
+    this.maxWidth = maxWidth || Math.min(process.stdout.columns - 4 || 76, 100);
+    this.currentLineLength = 0;
+    this.wordBuffer = '';
+  }
+
+  write(text) {
+    let output = '';
+
+    for (const char of text) {
+      if (char === '\n') {
+        // Flush word buffer and reset line
+        output += this.wordBuffer + '\n';
+        this.wordBuffer = '';
+        this.currentLineLength = 0;
+      } else if (char === ' ' || char === '\t') {
+        // Word boundary - check if we need to wrap
+        if (this.currentLineLength + this.wordBuffer.length + 1 > this.maxWidth && this.currentLineLength > 0) {
+          // Wrap to new line
+          output += '\n' + this.wordBuffer + char;
+          this.currentLineLength = this.wordBuffer.length + 1;
+        } else {
+          output += this.wordBuffer + char;
+          this.currentLineLength += this.wordBuffer.length + 1;
+        }
+        this.wordBuffer = '';
+      } else {
+        // Building a word
+        this.wordBuffer += char;
+      }
+    }
+
+    return output;
+  }
+
+  flush() {
+    // Return any remaining buffered word
+    const remaining = this.wordBuffer;
+    this.wordBuffer = '';
+    return remaining;
+  }
+}
+
+// =============================================================================
 // SEARCH HELPER
 // =============================================================================
 
@@ -300,6 +375,11 @@ async function handleCommand(input) {
     case '/help':
     case '/?':
       showHelp();
+      return true;
+
+    case '/version':
+    case '/v':
+      console.log(`\n${c.cyan}  Ripley Code v${VERSION}${c.reset}\n`);
       return true;
 
     case '/files':
@@ -613,8 +693,32 @@ async function handleCommand(input) {
       } else {
         interactionMode = 'plan';
         console.log(`\n${c.cyan}  📋 PLAN MODE: ON${c.reset}`);
-        console.log(`${c.dim}    AI will generate plans but NO file changes or commands will be executed.${c.reset}`);
-        console.log(`${c.dim}    Use /plan again to switch back to code mode.${c.reset}\n`);
+        console.log(`${c.dim}    AI will create a plan (saved to .ripley/plan.md) instead of code.${c.reset}`);
+        console.log(`${c.dim}    Use /implement to execute the plan, or /plan to switch back.${c.reset}\n`);
+      }
+      return true;
+
+    case '/implement':
+      const planPath = path.join(projectDir, '.ripley', 'plan.md');
+      if (!fs.existsSync(planPath)) {
+        console.log(`\n${c.yellow}  No plan found. Use /plan mode first to create one.${c.reset}\n`);
+        return true;
+      }
+      const planContent = fs.readFileSync(planPath, 'utf-8');
+      console.log(`\n${c.cyan}  📋 Plan to implement:${c.reset}\n`);
+      console.log(planContent.split('\n').map(l => `  ${l}`).join('\n'));
+      console.log();
+
+      const confirmImpl = await askQuestion(`${c.yellow}Implement this plan? (y/n): ${c.reset}`);
+      if (confirmImpl.toLowerCase() === 'y' || confirmImpl.toLowerCase() === 'yes') {
+        // Switch to code mode and send the plan for implementation
+        const prevMode = interactionMode;
+        interactionMode = 'code';
+        console.log(`\n${c.cyan}  🚀 Implementing plan...${c.reset}\n`);
+        await sendMessage(`Please implement this plan:\n\n${planContent}\n\nApply the changes now using <file_operation> tags.`);
+        interactionMode = prevMode;
+      } else {
+        console.log(`${c.dim}  Plan not implemented.${c.reset}\n`);
       }
       return true;
 
@@ -638,6 +742,40 @@ async function handleCommand(input) {
       console.log(`${c.dim}    /plan - Preview changes without executing${c.reset}`);
       console.log(`${c.dim}    /ask  - Question-only mode (no operations)${c.reset}`);
       console.log(`${c.dim}    Use /plan or /ask again to return to code mode${c.reset}\n`);
+      return true;
+
+    case '/prompt':
+      const validPrompts = ['base', 'landing', 'saas', 'auto'];
+      const requestedPrompt = args.trim().toLowerCase();
+
+      if (!requestedPrompt) {
+        // Show current prompt setting
+        const currentPrompt = promptOverride || 'auto';
+        console.log(`\n${c.cyan}  Prompt Mode:${c.reset} ${c.yellow}${currentPrompt}${c.reset}`);
+        console.log(`${c.dim}    /prompt base    - General coding assistant${c.reset}`);
+        console.log(`${c.dim}    /prompt landing - HTML landing pages${c.reset}`);
+        console.log(`${c.dim}    /prompt saas    - Next.js + Supabase apps${c.reset}`);
+        console.log(`${c.dim}    /prompt auto    - Auto-detect from message${c.reset}\n`);
+        return true;
+      }
+
+      if (!validPrompts.includes(requestedPrompt)) {
+        console.log(`\n${c.red}  Invalid prompt. Use: base, landing, saas, or auto${c.reset}\n`);
+        return true;
+      }
+
+      if (requestedPrompt === 'auto') {
+        promptOverride = null;
+        console.log(`\n${c.green}  ✓ Prompt mode: AUTO${c.reset} ${c.dim}(will detect from your message)${c.reset}\n`);
+      } else {
+        promptOverride = requestedPrompt;
+        const promptDescriptions = {
+          base: 'General coding assistant',
+          landing: 'HTML landing pages',
+          saas: 'Next.js + Supabase apps'
+        };
+        console.log(`\n${c.green}  ✓ Prompt mode: ${requestedPrompt.toUpperCase()}${c.reset} ${c.dim}(${promptDescriptions[requestedPrompt]})${c.reset}\n`);
+      }
       return true;
 
     case '/config':
@@ -773,7 +911,7 @@ async function sendMessage(message) {
         console.log(`${c.yellow}  ⚠ Image analysis failed, sending without description${c.reset}`);
       }
     } else {
-      console.log(`${c.yellow}  ⚠ No Gemini API key - set GEMINI_API_KEY for image analysis${c.reset}`);
+      console.log(`${c.yellow}  ⚠ No Gemini API key - use /set geminiApiKey YOUR_KEY then restart${c.reset}`);
     }
   }
 
@@ -815,9 +953,9 @@ async function sendMessage(message) {
 
   try {
     if (streamingEnabled) {
-      await sendStreamingMessage(fullMessage, apiUrl, pendingImages);
+      await sendStreamingMessage(fullMessage, apiUrl, pendingImages, message);
     } else {
-      await sendNonStreamingMessage(fullMessage, apiUrl, pendingImages);
+      await sendNonStreamingMessage(fullMessage, apiUrl, pendingImages, message);
     }
   } catch (error) {
     console.log(`\n${c.red}  ✗ Error: ${error.message}${c.reset}`);
@@ -825,45 +963,176 @@ async function sendMessage(message) {
   }
 }
 
-async function sendStreamingMessage(message, apiUrl, images = []) {
-  const modeColors = { code: c.cyan, plan: c.cyan, ask: c.magenta };
-  const modeIcons = { code: '●', plan: '📋', ask: '💬' };
-  console.log(`\n${modeColors[interactionMode]}  ${modeIcons[interactionMode]} ${interactionMode}${c.reset} ${c.dim}(streaming)${c.reset}\n`);
+async function sendStreamingMessage(message, apiUrl, images = [], rawMessage = '') {
+  // Fun thinking messages that rotate while generating
+  const thinkingMessages = [
+    'Brewing some code...',
+    'Consulting the matrix...',
+    'Waking up neurons...',
+    'Channeling the code spirits...',
+    'Asking the rubber duck...',
+    'Compiling thoughts...',
+    'Searching the codeverse...',
+    'Summoning syntax...',
+    'Debugging reality...',
+    'Caffeinating...',
+    'Reading the docs (jk)...',
+    'Connecting synapses...',
+    'Loading creativity...',
+    'Thinking really hard...',
+    'Almost there...'
+  ];
+  const generatingMessages = [
+    'Writing code...',
+    'Crafting response...',
+    'Generating...',
+    'Building solution...',
+    'Creating magic...',
+    'Typing furiously...',
+    'Almost done...',
+    'Putting pieces together...',
+    'Polishing...'
+  ];
+  const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let spinnerIndex = 0;
+  let messageIndex = 0;
+  let statusInterval = null;
+  let isGenerating = false;
+  let tickCount = 0;
+  let tokenCount = 0;
+  let statusLineLength = 0;
+
+  // Update status line (shown during both thinking and generating)
+  const updateStatus = () => {
+    spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
+    tickCount++;
+
+    // Change message every ~2 seconds (20 ticks at 100ms)
+    if (tickCount % 20 === 0) {
+      const messages = isGenerating ? generatingMessages : thinkingMessages;
+      messageIndex = (messageIndex + 1) % messages.length;
+    }
+
+    const messages = isGenerating ? generatingMessages : thinkingMessages;
+    const currentMessage = messages[messageIndex % messages.length];
+    const tokenInfo = isGenerating ? ` ${c.dim}(${tokenCount} tokens)${c.reset}` : '';
+    const statusText = `${c.cyan}  ${spinnerFrames[spinnerIndex]} ${currentMessage}${c.reset}${tokenInfo}`;
+
+    // Save cursor, move to status line, clear and write, restore cursor
+    if (isGenerating) {
+      // During generation: show status on same line, don't interfere with output
+      // We'll show a brief status that doesn't disrupt the flow
+    } else {
+      // During initial thinking: show on current line
+      process.stdout.clearLine(0);
+      process.stdout.cursorTo(0);
+      process.stdout.write(statusText);
+      statusLineLength = statusText.length;
+    }
+  };
+
+  // Start the status animation
+  const startThinking = () => {
+    process.stdout.write(`\n${c.cyan}  ${spinnerFrames[0]} ${thinkingMessages[0]}${c.reset}`);
+    statusInterval = setInterval(updateStatus, 100);
+  };
+
+  // Transition to generating mode (first token received)
+  const startGenerating = () => {
+    isGenerating = true;
+    messageIndex = 0;
+    tickCount = 0;
+    // Clear the thinking line and show AI label on same line
+    process.stdout.clearLine(0);
+    process.stdout.cursorTo(0);
+    process.stdout.write(`${c.cyan}Ripley →${c.reset} `);
+  };
+
+  const stopStatus = () => {
+    if (statusInterval) {
+      clearInterval(statusInterval);
+      statusInterval = null;
+    }
+  };
+
+  // Determine which prompt to use
+  // Priority: plan mode > promptOverride > interaction mode defaults
+  let promptMode;
+  if (interactionMode === 'plan') {
+    promptMode = 'plan'; // Use plan prompt for planning mode
+  } else if (promptOverride) {
+    promptMode = promptOverride;
+  } else if (interactionMode === 'ask') {
+    promptMode = 'base';
+  } else {
+    promptMode = null; // Let router auto-detect based on message content
+  }
 
   const body = {
     message,
-    mode: interactionMode === 'ask' ? 'base' : 'code', // Use base prompt for ask mode
+    rawMessage, // User's actual input for mode detection
     conversationHistory
   };
 
-  // Add images if present (for vision models)
-  if (images.length > 0) {
-    body.images = images.map(img => ({
-      type: 'image_url',
-      image_url: { url: img.dataUrl }
-    }));
+  // Only send mode if explicitly set (otherwise router auto-detects)
+  if (promptMode) {
+    body.mode = promptMode;
   }
+
+  // Note: Images are analyzed by Gemini and included as text in the message
+  // We don't send raw images to the AI Router (local LLM can't handle them)
+
+  // Create abort controller for this request
+  currentAbortController = new AbortController();
+
+  // Start the fun thinking animation
+  startThinking();
 
   const response = await fetch(`${apiUrl}/api/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: currentAbortController.signal
   });
 
   if (!response.ok) {
+    stopStatus();
+    currentAbortController = null;
     throw new Error(`Server error: ${response.status}`);
   }
 
   let fullResponse = '';
+  let firstTokenReceived = false;
+  const wordWrapper = new StreamingWordWrapper();
+  const markdownRenderer = new MarkdownRenderer();
 
   const streamHandler = new StreamHandler({
     onToken: (token) => {
-      process.stdout.write(token);
+      // Transition from thinking to generating on first token
+      if (!firstTokenReceived) {
+        firstTokenReceived = true;
+        startGenerating();
+      }
+      tokenCount++;
+      // Render Markdown to ANSI-styled output, then word-wrap
+      const rendered = markdownRenderer.render(token);
+      const wrapped = wordWrapper.write(rendered);
+      if (wrapped) process.stdout.write(wrapped);
     },
     onComplete: (response) => {
+      // Flush Markdown buffer first, then word wrapper
+      const mdRemaining = markdownRenderer.flush();
+      if (mdRemaining) {
+        const wrapped = wordWrapper.write(mdRemaining);
+        if (wrapped) process.stdout.write(wrapped);
+      }
+      const remaining = wordWrapper.flush();
+      if (remaining) process.stdout.write(remaining);
       fullResponse = response;
+      stopStatus();
     },
     onError: (error) => {
+      stopStatus();
       console.log(`\n${c.red}  Stream error: ${error.message}${c.reset}`);
     }
   });
@@ -871,26 +1140,36 @@ async function sendStreamingMessage(message, apiUrl, images = []) {
   try {
     await streamHandler.handleStream(response);
   } catch (error) {
+    stopStatus();
+    // Check if this was an abort
+    if (error.name === 'AbortError') {
+      currentAbortController = null;
+      return; // Don't process, user cancelled
+    }
     // If streaming fails, the response might not be SSE format
     // Try to read as regular JSON
     const text = await response.text();
+    const { renderMarkdown } = require('./lib/markdownRenderer');
     try {
       const data = JSON.parse(text);
       fullResponse = data.reply || text;
-      console.log(fullResponse);
+      console.log(renderMarkdown(fullResponse));
     } catch {
       fullResponse = text;
-      console.log(text);
+      console.log(renderMarkdown(text));
     }
   }
 
-  console.log('\n');
+  // Clear abort controller
+  currentAbortController = null;
+
+  console.log('\n'); // Add spacing after response for readability
 
   // Process the response
   await processAIResponse(fullResponse, message);
 }
 
-async function sendNonStreamingMessage(message, apiUrl, images = []) {
+async function sendNonStreamingMessage(message, apiUrl, images = [], rawMessage = '') {
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   const modeColors = { code: c.cyan, plan: c.cyan, ask: c.magenta };
   let i = 0;
@@ -902,16 +1181,13 @@ async function sendNonStreamingMessage(message, apiUrl, images = []) {
   try {
     const body = {
       message,
-      mode: interactionMode === 'ask' ? 'base' : 'code', // Use base prompt for ask mode
+      rawMessage, // User's actual input for mode detection
+      mode: interactionMode === 'ask' ? 'base' : null, // Let router auto-detect unless ask mode
       conversationHistory
     };
 
-    if (images.length > 0) {
-      body.images = images.map(img => ({
-        type: 'image_url',
-        image_url: { url: img.dataUrl }
-      }));
-    }
+    // Note: Images are analyzed by Gemini and included as text in the message
+    // We don't send raw images to the AI Router (local LLM can't handle them)
 
     const response = await fetch(`${apiUrl}/api/chat`, {
       method: 'POST',
@@ -928,8 +1204,9 @@ async function sendNonStreamingMessage(message, apiUrl, images = []) {
 
     const data = await response.json();
 
-    console.log(`\n${c.cyan}  ● code${c.reset} ${c.dim}(agent)${c.reset}\n`);
-    console.log(data.reply);
+    const { renderMarkdown } = require('./lib/markdownRenderer');
+    console.log(`\n${c.cyan}Ripley →${c.reset} `);
+    console.log(renderMarkdown(data.reply));
     console.log();
 
     await processAIResponse(data.reply, message);
@@ -945,6 +1222,23 @@ async function processAIResponse(reply, originalMessage) {
   // Track tokens
   tokenCounter.trackUsage(originalMessage, reply);
 
+  // In plan mode, save the plan to file and don't parse for operations
+  if (interactionMode === 'plan') {
+    const planPath = path.join(projectDir, '.ripley', 'plan.md');
+    const ripleyDir = path.join(projectDir, '.ripley');
+    if (!fs.existsSync(ripleyDir)) {
+      fs.mkdirSync(ripleyDir, { recursive: true });
+    }
+    fs.writeFileSync(planPath, reply);
+    console.log(`\n${c.green}  ✓ Plan saved to .ripley/plan.md${c.reset}`);
+    console.log(`${c.cyan}  Use /implement to execute this plan${c.reset}\n`);
+
+    // Update conversation history
+    conversationHistory.push({ role: 'user', content: originalMessage });
+    conversationHistory.push({ role: 'assistant', content: reply });
+    return;
+  }
+
   // Parse response
   const parsed = parseResponse(reply);
 
@@ -953,11 +1247,6 @@ async function processAIResponse(reply, originalMessage) {
     if (interactionMode === 'ask') {
       // Ask mode: Ignore file operations completely
       console.log(`${c.dim}  (${parsed.fileOperations.length} file operation(s) skipped - ASK mode)${c.reset}\n`);
-    } else if (interactionMode === 'plan') {
-      // Plan mode: Show operations but don't execute
-      console.log(`\n${c.cyan}  📋 PLAN MODE - Preview Only${c.reset}\n`);
-      console.log(formatOperationsBatch(parsed.fileOperations, fileManager));
-      console.log(`${c.cyan}  Use /plan to switch to code mode and apply changes.${c.reset}\n`);
     } else {
       // Code mode: Normal execution
       await handleFileOperations(parsed.fileOperations);
@@ -1269,8 +1558,8 @@ function createReadlineInterface() {
     terminal: true
   });
 
-  // Handle up/down for history, Shift+Tab for mode cycling
-  process.stdin.on('keypress', (char, key) => {
+  // Handle up/down for history, Shift+Tab for mode cycling, Alt+V for clipboard paste
+  process.stdin.on('keypress', async (char, key) => {
     if (!key) return;
 
     if (key.name === 'up') {
@@ -1300,6 +1589,40 @@ function createReadlineInterface() {
       process.stdout.write('\n');
       console.log(`${modeColors[interactionMode]}  ${modeIcons[interactionMode]} Mode: ${interactionMode.toUpperCase()}${c.reset} ${c.dim}- ${modeDescriptions[interactionMode]}${c.reset}`);
       rl.prompt(true);
+    } else if (key.name === 'v' && key.meta) {
+      // Alt+V: Paste screenshot from clipboard
+      process.stdout.write('\n');
+      console.log(`${c.cyan}  📋 Pasting from clipboard...${c.reset}`);
+
+      const result = await imageHandler.pasteFromClipboard();
+      if (result.success) {
+        const sizeKB = Math.round(result.data.size / 1024);
+        console.log(`${c.green}  ✓ Screenshot added (${sizeKB}KB)${c.reset}`);
+
+        // Auto-analyze with Gemini if available
+        if (visionAnalyzer.isEnabled()) {
+          console.log(`${c.cyan}  🔍 Analyzing with Gemini...${c.reset}`);
+          const analysis = await visionAnalyzer.analyzeImage(result.data, '');
+          if (analysis) {
+            console.log(`${c.green}  ✓ Image analyzed - ready for your question${c.reset}`);
+            // Store analysis for next message
+            result.data.analysis = analysis;
+          }
+        }
+        console.log(`${c.dim}  Type your question about the screenshot${c.reset}`);
+      } else {
+        console.log(`${c.red}  ✗ ${result.error}${c.reset}`);
+      }
+      console.log();
+      rl.prompt(true);
+    } else if (key.name === 'escape') {
+      // Escape: Cancel current request
+      if (currentAbortController) {
+        currentAbortController.abort();
+        currentAbortController = null;
+        console.log(`\n\n${c.yellow}  ⚠ Request cancelled${c.reset}\n`);
+        rl.prompt(true);
+      }
     }
   });
 
@@ -1325,15 +1648,18 @@ Ripley Code v${VERSION} - AI Coding Agent
 
 Usage:
   ripley              Start interactive mode
+  ripley yolo         Start in YOLO mode (auto-apply all changes)
   ripley init         Initialize .ripley config
   ripley <request>    One-shot mode
 
 Options:
   --help, -h          Show this help
   --version, -v       Show version
+  --yolo              Start in YOLO mode
 
 Examples:
   ripley
+  ripley yolo
   ripley "Add a dark mode toggle"
   ripley "Fix the bug in @src/api/auth.ts"
 `);
@@ -1363,9 +1689,18 @@ Examples:
     process.exit(0);
   }
 
+  // Check for yolo flag to start in YOLO mode
+  const startInYolo = args.includes('yolo') || args.includes('--yolo');
+
   // Show banner and initialize
   showBanner();
   initProject();
+
+  // Enable YOLO mode if started with 'yolo' argument
+  if (startInYolo) {
+    config.set('yoloMode', true);
+    console.log(`${c.red}  ⚡ YOLO MODE ACTIVE${c.reset} ${c.dim}(auto-applying all changes)${c.reset}`);
+  }
 
   const connected = await checkConnection();
   if (!connected) {
@@ -1377,8 +1712,9 @@ Examples:
   // Create readline with history support
   rl = createReadlineInterface();
 
-  // Handle one-shot mode
-  if (args.length > 0 && args[0] !== 'init') {
+  // Handle one-shot mode (but not for special commands like init, yolo)
+  const specialArgs = ['init', 'yolo', '--yolo'];
+  if (args.length > 0 && !specialArgs.includes(args[0])) {
     const request = args.join(' ');
     await sendMessage(request);
     rl.close();
@@ -1407,6 +1743,12 @@ Examples:
       // Add to history
       historyManager.add(trimmed);
       historyManager.resetIndex();
+
+      // Handle bare "exit" or "quit" without slash
+      if (trimmed.toLowerCase() === 'exit' || trimmed.toLowerCase() === 'quit') {
+        await handleCommand('/exit');
+        return; // Won't reach here since /exit calls process.exit(0)
+      }
 
       // Check for commands
       if (trimmed.startsWith('/')) {
