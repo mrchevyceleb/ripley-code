@@ -121,6 +121,7 @@ ${c.yellow}  /implement${c.reset}          Execute the saved plan
 ${c.yellow}  /ask${c.reset}                Toggle ASK mode (questions only, no file ops)
 ${c.yellow}  /mode${c.reset}               Show current mode
 ${c.yellow}  /yolo${c.reset}               Toggle YOLO mode (auto-apply all changes)
+${c.yellow}  /agent${c.reset}              Toggle agentic mode (AI reads files on demand)
 ${c.yellow}  /prompt <type>${c.reset}      Set prompt: base, landing, saas, auto
 
 ${c.orange}${c.dim}Config Commands:${c.reset}
@@ -211,6 +212,11 @@ function initProject() {
     console.log(`${c.green}  ✓${c.reset} Vision analysis enabled (Gemini)`);
   } else {
     console.log(`${c.dim}  ○ Vision analysis disabled (set GEMINI_API_KEY or GOOGLE_API_KEY)${c.reset}`);
+  }
+
+  // Show agentic mode status
+  if (config.get('agenticMode')) {
+    console.log(`${c.cyan}  🤖 AGENTIC MODE${c.reset} ${c.dim}(AI reads files on demand)${c.reset}`);
   }
 }
 
@@ -685,6 +691,19 @@ async function handleCommand(input) {
       }
       return true;
 
+    case '/agent':
+      const newAgentic = !config.get('agenticMode');
+      config.set('agenticMode', newAgentic);
+      if (newAgentic) {
+        console.log(`\n${c.cyan}  🤖 AGENTIC MODE: ON${c.reset}`);
+        console.log(`${c.dim}    AI can now read files and explore your project on demand.${c.reset}`);
+        console.log(`${c.dim}    It will analyze relevant files before answering questions.${c.reset}\n`);
+      } else {
+        console.log(`\n${c.green}  ✓ Agentic mode: OFF${c.reset}`);
+        console.log(`${c.dim}    Using standard streaming mode. Pre-load files with /read or @file.${c.reset}\n`);
+      }
+      return true;
+
     case '/plan':
       if (interactionMode === 'plan') {
         interactionMode = 'code';
@@ -915,44 +934,77 @@ async function sendMessage(message) {
     }
   }
 
-  // Build context
-  const context = contextBuilder.buildContext();
-
-  // Check token limit
-  const contextTokens = tokenCounter.estimateTokens(context);
-  const limit = tokenCounter.checkLimit(contextTokens);
-
-  if (limit.isWarning) {
-    console.log(`${c.yellow}  ⚠ Context is ${Math.round(limit.percentage * 100)}% of token limit${c.reset}`);
-  }
-
   // Get project instructions
   const instructions = config.getInstructions();
 
-  // Build full message
+  // Build full message - differs based on agentic mode
   let systemNote = '';
   if (config.get('compactMode')) {
     systemNote = '\n\n[USER PREFERENCE: Be concise. Shorter explanations, focus on code changes.]';
   }
 
-  let fullMessage = `## Current Project Context\n\n${context}`;
+  const agenticMode = config.get('agenticMode');
+  let fullMessage;
 
-  if (instructions) {
-    fullMessage += `\n\n## Project-Specific Instructions\n\n${instructions}`;
+  if (agenticMode) {
+    // Agentic mode: minimal context, AI will request files as needed
+    const structure = contextBuilder.scanDirectory();
+    const fileList = [];
+    const collectFiles = (items, prefix = '') => {
+      for (const item of items) {
+        if (item.type === 'file') {
+          fileList.push(prefix + item.name);
+        } else if (item.children) {
+          collectFiles(item.children, prefix + item.name + '/');
+        }
+      }
+    };
+    collectFiles(structure);
+
+    fullMessage = `## Project Overview\n\nYou are working in: ${projectDir}\n\nFiles available (use read_file tool to examine):\n${fileList.slice(0, 50).join('\n')}${fileList.length > 50 ? `\n... and ${fileList.length - 50} more files` : ''}`;
+
+    if (instructions) {
+      fullMessage += `\n\n## Project-Specific Instructions\n\n${instructions}`;
+    }
+
+    if (imageAnalysis) {
+      fullMessage += `\n\n## Image Analysis\n\n${imageAnalysis}`;
+    }
+
+    fullMessage += `\n\n## User Request\n\n${message}${systemNote}`;
+  } else {
+    // Standard mode: send full context upfront
+    const context = contextBuilder.buildContext();
+
+    // Check token limit
+    const contextTokens = tokenCounter.estimateTokens(context);
+    const limit = tokenCounter.checkLimit(contextTokens);
+
+    if (limit.isWarning) {
+      console.log(`${c.yellow}  ⚠ Context is ${Math.round(limit.percentage * 100)}% of token limit${c.reset}`);
+    }
+
+    fullMessage = `## Current Project Context\n\n${context}`;
+
+    if (instructions) {
+      fullMessage += `\n\n## Project-Specific Instructions\n\n${instructions}`;
+    }
+
+    if (imageAnalysis) {
+      fullMessage += `\n\n## Image Analysis\n\n${imageAnalysis}`;
+    }
+
+    fullMessage += `\n\n## User Request\n\n${message}${systemNote}`;
   }
-
-  // Include image analysis if available
-  if (imageAnalysis) {
-    fullMessage += `\n\n## Image Analysis\n\n${imageAnalysis}`;
-  }
-
-  fullMessage += `\n\n## User Request\n\n${message}${systemNote}`;
 
   const apiUrl = config.get('apiUrl');
   const streamingEnabled = config.get('streamingEnabled');
 
   try {
-    if (streamingEnabled) {
+    if (agenticMode) {
+      // Agentic mode: AI can read files and explore on demand
+      await sendAgenticMessage(fullMessage, apiUrl, pendingImages, message);
+    } else if (streamingEnabled) {
       await sendStreamingMessage(fullMessage, apiUrl, pendingImages, message);
     } else {
       await sendNonStreamingMessage(fullMessage, apiUrl, pendingImages, message);
@@ -1167,6 +1219,176 @@ async function sendStreamingMessage(message, apiUrl, images = [], rawMessage = '
 
   // Process the response
   await processAIResponse(fullResponse, message);
+}
+
+async function sendAgenticMessage(message, apiUrl, images = [], rawMessage = '') {
+  const { renderMarkdown } = require('./lib/markdownRenderer');
+
+  // Agentic messages for tool calls
+  const toolMessages = {
+    read_file: '📖 Reading',
+    list_files: '📁 Listing',
+    search_code: '🔍 Searching'
+  };
+
+  const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let spinnerIndex = 0;
+  let statusInterval = null;
+  let currentStatus = 'Thinking...';
+
+  const updateSpinner = () => {
+    spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
+    process.stdout.clearLine(0);
+    process.stdout.cursorTo(0);
+    process.stdout.write(`${c.cyan}  ${spinnerFrames[spinnerIndex]} ${currentStatus}${c.reset}`);
+  };
+
+  const startSpinner = () => {
+    process.stdout.write(`\n${c.cyan}  ${spinnerFrames[0]} ${currentStatus}${c.reset}`);
+    statusInterval = setInterval(updateSpinner, 100);
+  };
+
+  const stopSpinner = () => {
+    if (statusInterval) {
+      clearInterval(statusInterval);
+      statusInterval = null;
+    }
+    process.stdout.clearLine(0);
+    process.stdout.cursorTo(0);
+  };
+
+  // Determine prompt mode
+  let promptMode;
+  if (interactionMode === 'plan') {
+    promptMode = 'plan';
+  } else if (interactionMode === 'ask') {
+    promptMode = 'base';
+  } else {
+    promptMode = null;
+  }
+
+  const body = {
+    message,
+    rawMessage,
+    conversationHistory,
+    projectDir // Send project directory for tool execution
+  };
+
+  if (promptMode) {
+    body.mode = promptMode;
+  }
+
+  currentAbortController = new AbortController();
+  startSpinner();
+
+  try {
+    const response = await fetch(`${apiUrl}/api/chat/agentic`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: currentAbortController.signal
+    });
+
+    if (!response.ok) {
+      stopSpinner();
+      throw new Error(`Server error: ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullResponse = '';
+    let toolCallsDisplayed = [];
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+
+        if (data === '[DONE]') continue;
+
+        try {
+          const event = JSON.parse(data);
+
+          if (event.type === 'tool_call') {
+            // Display tool call
+            const toolMsg = toolMessages[event.tool] || '🔧 Using';
+            currentStatus = `${toolMsg} ${event.args.path || event.args.pattern || ''}...`;
+            updateSpinner();
+
+            toolCallsDisplayed.push({
+              tool: event.tool,
+              args: event.args
+            });
+          } else if (event.type === 'tool_result') {
+            // Tool completed
+            const icon = event.success ? c.green + '✓' : c.red + '✗';
+            // Show brief result (will be cleared by next spinner update)
+          } else if (event.type === 'content') {
+            // Final response
+            stopSpinner();
+
+            // Filter out thinking blocks from response
+            let content = event.content;
+            // Remove <think>...</think> blocks
+            content = content.replace(/<think>[\s\S]*?<\/think>/gi, '');
+            // Remove <thinking>...</thinking> blocks
+            content = content.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+            // Remove orphan </think> with everything before it (model reasoning without opening tag)
+            content = content.replace(/^[\s\S]*?<\/think>\s*/i, '');
+            content = content.replace(/^[\s\S]*?<\/thinking>\s*/i, '');
+            content = content.trim();
+
+            // Show tool calls summary if any
+            if (toolCallsDisplayed.length > 0) {
+              console.log(`${c.dim}┌─ Analyzed ${toolCallsDisplayed.length} file(s)${c.reset}`);
+              for (const tc of toolCallsDisplayed) {
+                const icon = toolMessages[tc.tool]?.split(' ')[0] || '🔧';
+                console.log(`${c.dim}│ ${icon} ${tc.args.path || tc.args.pattern || tc.tool}${c.reset}`);
+              }
+              console.log(`${c.dim}└─${c.reset}\n`);
+            }
+
+            console.log(`${c.cyan}Ripley →${c.reset} `);
+            console.log(renderMarkdown(content));
+            fullResponse = content;
+          } else if (event.error) {
+            stopSpinner();
+            console.log(`\n${c.red}  Error: ${event.error}${c.reset}`);
+            if (event.details) {
+              console.log(`${c.dim}  ${event.details}${c.reset}`);
+            }
+          }
+        } catch {
+          // Not JSON, ignore
+        }
+      }
+    }
+
+    stopSpinner();
+    currentAbortController = null;
+    console.log('\n');
+
+    if (fullResponse) {
+      await processAIResponse(fullResponse, message);
+    }
+
+  } catch (error) {
+    stopSpinner();
+    currentAbortController = null;
+
+    if (error.name === 'AbortError') {
+      return;
+    }
+    throw error;
+  }
 }
 
 async function sendNonStreamingMessage(message, apiUrl, images = [], rawMessage = '') {
