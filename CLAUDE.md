@@ -2,7 +2,7 @@
 
 ## What is Ripley Code?
 
-A local AI coding agent CLI (v3.1.1) that connects to LM Studio via an AI Router. Users run `ripley` in their project directory to get AI-assisted coding with file operations, streaming responses, and vision analysis.
+A local AI coding agent CLI (v3.3.0) that connects to LM Studio via an AI Router. Users run `ripley` in their project directory to get AI-assisted coding with file operations, streaming responses, vision analysis, and **agentic tool calling**.
 
 ## Architecture
 
@@ -41,6 +41,7 @@ User's Machine                    Main Server (Matt's PC)
 | `lib/historyManager.js` | Command history and conversation save/load |
 | `lib/imageHandler.js` | Image file handling and EXIF data |
 | `lib/watcher.js` | File system watcher for auto-reload |
+| `lib/markdownRenderer.js` | Renders Markdown to ANSI-styled terminal output |
 
 ## Interaction Modes
 
@@ -89,6 +90,114 @@ Toggles auto-apply mode - file changes and commands execute without confirmation
 - Filters out `<think>` and `<thinking>` blocks from display
 - Model reasoning stays hidden, only explanations shown to user
 - Full response (with blocks) still captured for parsing
+
+### Agentic Mode (`/agent`)
+AI can read files and explore the project on demand using tool calling. This is the default mode.
+
+**How it works:**
+1. Ripley sends a minimal context (just file list, ~500 tokens) instead of full file contents
+2. AI Router sends request to LM Studio with tool definitions
+3. Model decides what files to read based on the question
+4. Tools execute server-side, results fed back to model
+5. Model generates final response with full context
+
+**Benefits:**
+- Much more efficient token usage
+- AI only reads what's relevant to the question
+- Faster initial response (less prompt processing)
+- Can handle larger codebases
+
+Toggle with `/agent` command. When off, uses traditional mode where files are pre-loaded.
+
+### Markdown Rendering
+- Responses render with ANSI styling in terminal
+- **Bold**, *italic*, `inline code`, code blocks with language labels
+- Headers colored by level, styled bullet points
+
+## Agentic Tool System
+
+The AI Router (`C:\ai-router\server.js`) implements tool calling for agentic mode. Tools are defined using OpenAI-compatible format and executed server-side.
+
+### Current Tools
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `read_file` | Read contents of a file | `path` (string, required) |
+| `list_files` | List files in a directory | `path` (string), `recursive` (boolean) |
+| `search_code` | Search for patterns in files | `pattern` (string, required), `path` (string), `file_pattern` (string) |
+
+### Adding New Tools
+
+1. **Define the tool** in `C:\ai-router\server.js` in the `tools` array:
+```javascript
+{
+  type: 'function',
+  function: {
+    name: 'tool_name',
+    description: 'What the tool does',
+    parameters: {
+      type: 'object',
+      properties: {
+        param1: {
+          type: 'string',
+          description: 'Parameter description'
+        }
+      },
+      required: ['param1']
+    }
+  }
+}
+```
+
+2. **Implement the executor** function:
+```javascript
+function executeToolName(projectDir, param1) {
+  // Security: validate paths stay within projectDir
+  // Execute the tool logic
+  // Return { result } or { error: 'message' }
+}
+```
+
+3. **Add to the switch** in `executeTool()`:
+```javascript
+case 'tool_name':
+  return executeToolName(projectDir, args.param1);
+```
+
+4. **Update Ripley's display** (optional) in `sendAgenticMessage()`:
+```javascript
+const toolMessages = {
+  tool_name: '🔧 Doing something',
+  // ...
+};
+```
+
+### Tool Execution Flow
+
+```
+User asks question
+       ↓
+Ripley sends to /api/chat/agentic with projectDir
+       ↓
+AI Router builds messages with tool definitions
+       ↓
+LM Studio returns tool_calls (or final response)
+       ↓
+AI Router executes tools, adds results to messages
+       ↓
+Loop until model gives final response (max 10 iterations)
+       ↓
+Stream events back to Ripley (tool_call, tool_result, content)
+       ↓
+Ripley displays progress and final response
+```
+
+### Security Considerations
+- All file paths are validated to stay within `projectDir`
+- Tools ignore `node_modules`, `.git`, etc.
+- File reads are truncated at 50KB
+- Search results capped at 50 matches
+- Max 10 tool call iterations per request
 
 ## AI Router Prompts
 
