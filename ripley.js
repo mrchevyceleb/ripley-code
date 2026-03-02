@@ -1,19 +1,20 @@
 #!/usr/bin/env node
 
 /**
- * Ripley Code v3.0.0 - Your local AI coding agent
+ * Ripley Code v4.0.0 - Your local AI coding agent
+ *
+ * Direct to LM Studio - no middleware needed.
  *
  * Features:
- * - Streaming responses
+ * - Named model profiles with /model switching
+ * - Streaming responses with markdown rendering
  * - File read/write with diffs and backups
+ * - Agentic mode (AI reads files on demand)
+ * - Local vision model support with Gemini fallback
  * - @ mentions for quick file loading
- * - Command history (up/down arrows)
- * - Tab completion
- * - Watch mode for file changes
- * - Conversation save/load
- * - Token tracking and cost estimation
- * - Image/screenshot support
- * - Project-specific instructions
+ * - Command history, tab completion, watch mode
+ * - Conversation save/load, token tracking
+ * - Extensible prompts (drop .md files in prompts/)
  */
 
 const readline = require('readline');
@@ -34,12 +35,16 @@ const { StreamHandler } = require('./lib/streamHandler');
 const { parseResponse } = require('./lib/parser');
 const { formatOperationsBatch, formatCompactSummary, colors: c } = require('./lib/diffViewer');
 const { MarkdownRenderer } = require('./lib/markdownRenderer');
+const LmStudio = require('./lib/lmStudio');
+const PromptManager = require('./lib/promptManager');
+const ModelRegistry = require('./lib/modelRegistry');
+const { AgenticRunner } = require('./lib/agenticRunner');
 
 // =============================================================================
 // CONFIGURATION
 // =============================================================================
 
-const VERSION = '3.3.0';
+const VERSION = '4.0.0';
 
 // =============================================================================
 // GLOBALS
@@ -56,14 +61,20 @@ let tokenCounter = null;
 let watcher = null;
 let imageHandler = null;
 let visionAnalyzer = null;
+let lmStudio = null;
+let promptManager = null;
+let modelRegistry = null;
 let conversationHistory = [];
 let rl = null;
 
 // Interaction modes: 'code' (default), 'plan' (preview only), 'ask' (no operations)
 let interactionMode = 'code';
 
-// Prompt override: null = auto-detect, or 'base', 'landing', 'saas'
-let promptOverride = null;
+// Active prompt name (default: 'base', user can switch with /prompt)
+let activePrompt = 'base';
+
+// Thinking mode: when enabled, models that support it will reason before answering
+let thinkingMode = false;
 
 // Abort controller for cancelling requests with Escape
 let currentAbortController = null;
@@ -84,7 +95,7 @@ ${c.orange}
     ╚═╝  ╚═╝╚═╝╚═╝     ╚══════╝╚══════╝   ╚═╝
 ${c.reset}
 ${c.cyan}    ═══════════════════════════════════════════${c.reset}
-${c.dim}    Ripley Code • v${VERSION} • AI Coding Agent${c.reset}
+${c.dim}    Ripley Code • v${VERSION} • Direct to LM Studio${c.reset}
 ${c.cyan}    ═══════════════════════════════════════════${c.reset}
 `);
 }
@@ -98,7 +109,7 @@ ${c.yellow}  /unread <path>${c.reset}      Remove file from context
 ${c.yellow}  /tree${c.reset}               Show project structure
 ${c.yellow}  /find <pattern>${c.reset}     Find files matching pattern
 ${c.yellow}  /grep <text>${c.reset}        Search for text in files
-${c.yellow}  /image <path>${c.reset}       Add image (auto-analyzed with Gemini)
+${c.yellow}  /image <path>${c.reset}       Add image (vision model or Gemini fallback)
 
 ${c.orange}${c.dim}Git Commands:${c.reset}
 ${c.yellow}  /git${c.reset}                Show git status
@@ -114,6 +125,7 @@ ${c.yellow}  /sessions${c.reset}           List saved sessions
 ${c.yellow}  /context${c.reset}            Show context size & tokens
 ${c.yellow}  /tokens${c.reset}             Show token usage this session
 ${c.yellow}  /compact${c.reset}            Toggle compact mode
+${c.yellow}  /think${c.reset}              Toggle thinking mode (gpt-oss reasons before answering)
 
 ${c.orange}${c.dim}Modes:${c.reset}
 ${c.yellow}  /plan${c.reset}               Toggle PLAN mode (creates plan, no code)
@@ -121,8 +133,9 @@ ${c.yellow}  /implement${c.reset}          Execute the saved plan
 ${c.yellow}  /ask${c.reset}                Toggle ASK mode (questions only, no file ops)
 ${c.yellow}  /mode${c.reset}               Show current mode
 ${c.yellow}  /yolo${c.reset}               Toggle YOLO mode (auto-apply all changes)
-${c.yellow}  /agent${c.reset}              Toggle agentic mode (AI reads files on demand)
-${c.yellow}  /prompt <type>${c.reset}      Set prompt: base, landing, saas, auto
+${c.yellow}  /agent${c.reset}              Show agentic mode info (always on)
+${c.yellow}  /model [name]${c.reset}      Show/switch model (nemotron, coder, max, vision...)
+${c.yellow}  /prompt [name]${c.reset}     Show/switch prompt (base, code-agent, or any .md)
 
 ${c.orange}${c.dim}Config Commands:${c.reset}
 ${c.yellow}  /config${c.reset}             Show current config
@@ -146,7 +159,7 @@ ${c.gray}  • Press ${c.cyan}Tab${c.gray} for completion
 ${c.gray}  • Press ${c.cyan}Shift+Tab${c.gray} to cycle modes (code → plan → ask)
 ${c.gray}  • Press ${c.cyan}Alt+V${c.gray} to paste screenshot from clipboard
 ${c.gray}  • Press ${c.cyan}Escape${c.gray} to cancel current request
-${c.gray}  • Create ${c.cyan}.ripley/instructions.md${c.gray} for project-specific AI instructions
+${c.gray}  • Create ${c.cyan}RIPLEY.md${c.gray} in your project root for project-specific AI instructions
 ${c.reset}
 `);
 }
@@ -166,10 +179,32 @@ function initProject() {
   tokenCounter = new TokenCounter(config);
   imageHandler = new ImageHandler(projectDir);
 
+  // Initialize LM Studio client
+  const lmStudioUrl = config.get('lmStudioUrl') || 'http://localhost:1234';
+  lmStudio = new LmStudio({ baseUrl: lmStudioUrl });
+
+  // Initialize prompt manager (loads .md files from prompts/ directory)
+  const promptsDir = path.join(__dirname, 'prompts');
+  promptManager = new PromptManager(promptsDir);
+
+  // Initialize model registry
+  const modelsPath = path.join(__dirname, 'models.json');
+  modelRegistry = new ModelRegistry(modelsPath, lmStudio);
+
+  // Restore last active model from config
+  const savedModel = config.get('activeModel');
+  if (savedModel && modelRegistry.get(savedModel)) {
+    modelRegistry.setCurrent(savedModel);
+  } else {
+    modelRegistry.setCurrent(modelRegistry.getDefault());
+  }
+
+  // Restore active prompt from config
+  activePrompt = config.get('activePrompt') || 'base';
+
   // Try to get Gemini API key from: 1) project config, 2) global config, 3) env var
   let geminiKey = config.get('geminiApiKey');
   if (!geminiKey) {
-    // Check global config in Ripley install directory
     const globalConfigPath = path.join(__dirname, '.ripley', 'config.json');
     try {
       if (fs.existsSync(globalConfigPath)) {
@@ -201,38 +236,48 @@ function initProject() {
   contextBuilder.loadPriorityFiles();
   console.log(`${c.green}  ✓${c.reset} Context: ${contextBuilder.getLoadedFiles().length} files loaded`);
 
-  // Check for project instructions
+  // Check for project instructions (RIPLEY.md or .ripley/instructions.md)
   const instructions = config.getInstructions();
   if (instructions) {
-    console.log(`${c.green}  ✓${c.reset} Project instructions loaded`);
+    console.log(`${c.green}  ✓${c.reset} Project instructions loaded ${c.dim}(${instructions.source})${c.reset}`);
   }
 
-  // Check for vision analyzer
-  if (visionAnalyzer.isEnabled()) {
-    console.log(`${c.green}  ✓${c.reset} Vision analysis enabled (Gemini)`);
+  // Show model info
+  const currentModel = modelRegistry.getCurrentModel();
+  if (currentModel) {
+    console.log(`${c.green}  ✓${c.reset} Model: ${c.white}${currentModel.name}${c.reset} ${c.dim}(${currentModel.key})${c.reset}`);
+  }
+
+  // Show prompt info
+  console.log(`${c.green}  ✓${c.reset} Prompt: ${c.white}${activePrompt}${c.reset} ${c.dim}(${promptManager.list().length} available)${c.reset}`);
+
+  // Vision capability
+  if (modelRegistry.currentSupportsVision()) {
+    console.log(`${c.green}  ✓${c.reset} Vision: local model (direct)`);
+  } else if (visionAnalyzer.isEnabled()) {
+    console.log(`${c.green}  ✓${c.reset} Vision: Gemini fallback`);
   } else {
-    console.log(`${c.dim}  ○ Vision analysis disabled (set GEMINI_API_KEY or GOOGLE_API_KEY)${c.reset}`);
+    console.log(`${c.dim}  ○ Vision disabled (no vision model or GEMINI_API_KEY)${c.reset}`);
   }
 
-  // Show agentic mode status
-  if (config.get('agenticMode')) {
-    console.log(`${c.cyan}  🤖 AGENTIC MODE${c.reset} ${c.dim}(AI reads files on demand)${c.reset}`);
-  }
+  console.log(`${c.cyan}  ✓${c.reset} Mode: always agentic ${c.dim}(reads files on demand, streams final response)${c.reset}`);
 }
 
 async function checkConnection() {
-  const apiUrl = config.get('apiUrl');
-  try {
-    const response = await fetch(`${apiUrl}/api/health`);
-    if (response.ok) {
-      console.log(`${c.green}  ✓${c.reset} Connected to AI Router`);
-      return true;
+  const connected = await lmStudio.isConnected();
+  if (connected) {
+    console.log(`${c.green}  ✓${c.reset} LM Studio: Connected (${lmStudio.baseUrl})`);
+
+    // Auto-discover model IDs
+    const discovery = await modelRegistry.discover();
+    if (discovery.matched > 0) {
+      console.log(`${c.green}  ✓${c.reset} Models: ${discovery.matched} matched from ${discovery.total} loaded`);
     }
-  } catch {
-    // Failed
+
+    return true;
   }
-  console.log(`${c.red}  ✗${c.reset} Cannot connect to ${apiUrl}`);
-  console.log(`${c.dim}    Make sure the AI Router is running${c.reset}\n`);
+  console.log(`${c.red}  ✗${c.reset} Cannot connect to LM Studio at ${lmStudio.baseUrl}`);
+  console.log(`${c.dim}    Make sure LM Studio is running${c.reset}\n`);
   return false;
 }
 
@@ -655,6 +700,21 @@ async function handleCommand(input) {
       console.log();
       return true;
 
+    case '/think':
+      if (!modelRegistry.currentSupportsThinking()) {
+        console.log(`\n${c.yellow}  ⚠ Current model (${modelRegistry.getCurrent()}) doesn't support thinking mode.${c.reset}`);
+        console.log(`${c.dim}  Switch to gpt-oss (/model gpt-oss) to use thinking.${c.reset}\n`);
+      } else {
+        thinkingMode = !thinkingMode;
+        const thinkIcon = thinkingMode ? `${c.cyan}🧠 ON${c.reset}` : `${c.dim}OFF${c.reset}`;
+        console.log(`\n${c.green}  ✓ Thinking mode: ${thinkIcon}${c.reset}`);
+        if (thinkingMode) {
+          console.log(`${c.dim}  gpt-oss will reason before responding. Slower but smarter.${c.reset}`);
+        }
+        console.log();
+      }
+      return true;
+
     case '/compact':
       const newCompact = !config.get('compactMode');
       config.set('compactMode', newCompact);
@@ -692,16 +752,8 @@ async function handleCommand(input) {
       return true;
 
     case '/agent':
-      const newAgentic = !config.get('agenticMode');
-      config.set('agenticMode', newAgentic);
-      if (newAgentic) {
-        console.log(`\n${c.cyan}  🤖 AGENTIC MODE: ON${c.reset}`);
-        console.log(`${c.dim}    AI can now read files and explore your project on demand.${c.reset}`);
-        console.log(`${c.dim}    It will analyze relevant files before answering questions.${c.reset}\n`);
-      } else {
-        console.log(`\n${c.green}  ✓ Agentic mode: OFF${c.reset}`);
-        console.log(`${c.dim}    Using standard streaming mode. Pre-load files with /read or @file.${c.reset}\n`);
-      }
+      console.log(`\n${c.cyan}  Ripley is always agentic.${c.reset}`);
+      console.log(`${c.dim}    The AI reads files on demand and streams the final response.${c.reset}\n`);
       return true;
 
     case '/plan':
@@ -764,36 +816,67 @@ async function handleCommand(input) {
       return true;
 
     case '/prompt':
-      const validPrompts = ['base', 'landing', 'saas', 'auto'];
       const requestedPrompt = args.trim().toLowerCase();
 
       if (!requestedPrompt) {
-        // Show current prompt setting
-        const currentPrompt = promptOverride || 'auto';
-        console.log(`\n${c.cyan}  Prompt Mode:${c.reset} ${c.yellow}${currentPrompt}${c.reset}`);
-        console.log(`${c.dim}    /prompt base    - General coding assistant${c.reset}`);
-        console.log(`${c.dim}    /prompt landing - HTML landing pages${c.reset}`);
-        console.log(`${c.dim}    /prompt saas    - Next.js + Supabase apps${c.reset}`);
-        console.log(`${c.dim}    /prompt auto    - Auto-detect from message${c.reset}\n`);
+        // Show current prompt and available options
+        const available = promptManager.list();
+        console.log(`\n${c.cyan}  Active Prompt:${c.reset} ${c.yellow}${activePrompt}${c.reset}`);
+        console.log(`${c.dim}  Available prompts (drop .md files in prompts/ to add more):${c.reset}`);
+        for (const name of available) {
+          const marker = name === activePrompt ? `${c.green} ●${c.reset}` : `${c.dim} ○${c.reset}`;
+          console.log(`  ${marker} ${name}`);
+        }
+        console.log();
         return true;
       }
 
-      if (!validPrompts.includes(requestedPrompt)) {
-        console.log(`\n${c.red}  Invalid prompt. Use: base, landing, saas, or auto${c.reset}\n`);
+      if (!promptManager.has(requestedPrompt)) {
+        console.log(`\n${c.red}  Unknown prompt: "${requestedPrompt}". Available: ${promptManager.list().join(', ')}${c.reset}\n`);
         return true;
       }
 
-      if (requestedPrompt === 'auto') {
-        promptOverride = null;
-        console.log(`\n${c.green}  ✓ Prompt mode: AUTO${c.reset} ${c.dim}(will detect from your message)${c.reset}\n`);
-      } else {
-        promptOverride = requestedPrompt;
-        const promptDescriptions = {
-          base: 'General coding assistant',
-          landing: 'HTML landing pages',
-          saas: 'Next.js + Supabase apps'
-        };
-        console.log(`\n${c.green}  ✓ Prompt mode: ${requestedPrompt.toUpperCase()}${c.reset} ${c.dim}(${promptDescriptions[requestedPrompt]})${c.reset}\n`);
+      activePrompt = requestedPrompt;
+      config.set('activePrompt', requestedPrompt);
+      console.log(`\n${c.green}  ✓ Prompt: ${requestedPrompt}${c.reset}\n`);
+      return true;
+
+    case '/model':
+    case '/models':
+      const modelArg = args.trim().toLowerCase();
+
+      if (!modelArg) {
+        // Show current model and list all
+        const models = modelRegistry.list();
+        const current = modelRegistry.getCurrent();
+        console.log(`\n${c.cyan}  Models:${c.reset}`);
+        for (const m of models) {
+          const marker = m.key === current ? `${c.green} ●${c.reset}` : `${c.dim} ○${c.reset}`;
+          const tags = m.tags ? ` ${c.dim}[${m.tags.join(', ')}]${c.reset}` : '';
+          const id = m.id ? '' : ` ${c.red}(not loaded)${c.reset}`;
+          console.log(`  ${marker} ${c.yellow}${m.key}${c.reset} - ${m.name}${tags}${id}`);
+          if (m.description) {
+            console.log(`      ${c.dim}${m.description}${c.reset}`);
+          }
+        }
+        console.log(`\n${c.dim}  Usage: /model <name> to switch${c.reset}\n`);
+        return true;
+      }
+
+      try {
+        modelRegistry.setCurrent(modelArg);
+        config.set('activeModel', modelArg);
+        const switched = modelRegistry.getCurrentModel();
+        console.log(`\n${c.green}  ✓ Model: ${switched.name}${c.reset} ${c.dim}(${switched.key})${c.reset}`);
+        if (switched.tags?.includes('max-quality')) {
+          console.log(`${c.yellow}  ⚠ This model may be slow (spills to CPU)${c.reset}`);
+        }
+        if (switched.tags?.includes('vision')) {
+          console.log(`${c.green}  ✓ Vision enabled (local)${c.reset}`);
+        }
+        console.log();
+      } catch (err) {
+        console.log(`\n${c.red}  ✗ ${err.message}${c.reset}\n`);
       }
       return true;
 
@@ -828,13 +911,17 @@ async function handleCommand(input) {
     case '/instructions':
       const existingInstructions = config.getInstructions();
       if (existingInstructions) {
-        console.log(`\n${c.cyan}  Project Instructions:${c.reset}`);
-        console.log(`${c.dim}${existingInstructions.substring(0, 500)}${existingInstructions.length > 500 ? '...' : ''}${c.reset}`);
-        console.log(`\n${c.dim}  Edit: ${path.join(projectDir, '.ripley', 'instructions.md')}${c.reset}\n`);
+        console.log(`\n${c.cyan}  Project Instructions (${existingInstructions.source}):${c.reset}`);
+        const preview = existingInstructions.content.substring(0, 500);
+        console.log(`${c.dim}${preview}${existingInstructions.content.length > 500 ? '...' : ''}${c.reset}`);
+        const editPath = existingInstructions.source === 'RIPLEY.md'
+          ? path.join(projectDir, 'RIPLEY.md')
+          : path.join(projectDir, '.ripley', 'instructions.md');
+        console.log(`\n${c.dim}  Edit: ${editPath}${c.reset}\n`);
       } else {
-        const created = config.createDefaultInstructions();
-        console.log(`\n${c.green}  ✓ Created instructions template${c.reset}`);
-        console.log(`${c.dim}  Edit: ${path.join(projectDir, '.ripley', 'instructions.md')}${c.reset}\n`);
+        config.createDefaultInstructions();
+        console.log(`\n${c.green}  ✓ Created RIPLEY.md${c.reset}`);
+        console.log(`${c.dim}  Edit: ${path.join(projectDir, 'RIPLEY.md')}${c.reset}\n`);
       }
       return true;
 
@@ -905,6 +992,56 @@ async function handleCommand(input) {
 // AI INTERACTION
 // =============================================================================
 
+/**
+ * Auto-compaction: summarize conversationHistory when context approaches 80%.
+ * Replaces the full history with a compact summary + the last 4 messages.
+ */
+async function compactHistory() {
+  if (conversationHistory.length < 4) return; // nothing meaningful to compact
+
+  console.log(`\n${c.yellow}  ⚡ Auto-compacting context...${c.reset}`);
+
+  // Build a summarization prompt from the full history
+  const historyText = conversationHistory
+    .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${(m.content || '').slice(0, 2000)}`)
+    .join('\n\n');
+
+  const summaryMessages = [
+    {
+      role: 'system',
+      content: 'You are a helpful assistant. Summarize the following conversation concisely, preserving key decisions, file changes, and important context. Output only the summary, no preamble.'
+    },
+    {
+      role: 'user',
+      content: `Summarize this conversation:\n\n${historyText}`
+    }
+  ];
+
+  try {
+    const data = await lmStudio.chat(summaryMessages, {
+      model: modelRegistry.getCurrentId(),
+      temperature: 0.3,
+      maxTokens: 1500,
+      thinking: false
+    });
+    const summary = data.choices?.[0]?.message?.content?.trim();
+    if (!summary) throw new Error('Empty summary');
+
+    // Keep the last 4 messages (2 turns) for continuity, prefix with summary
+    const recent = conversationHistory.slice(-4);
+    conversationHistory = [
+      { role: 'user', content: '[Conversation summary]\n' + summary },
+      { role: 'assistant', content: 'Understood. I have the context from our previous conversation.' },
+      ...recent
+    ];
+    console.log(`${c.green}  ✓ Context compacted (summary + last 2 turns retained)${c.reset}\n`);
+  } catch (err) {
+    // Fallback: just trim to last 20 messages
+    conversationHistory = conversationHistory.slice(-20);
+    console.log(`${c.yellow}  ⚠ Compaction failed (${err.message}), trimmed to 20 messages${c.reset}\n`);
+  }
+}
+
 async function sendMessage(message) {
   // Load @ mentioned files
   const loadedFromMentions = await loadMentionedFiles(message);
@@ -919,8 +1056,11 @@ async function sendMessage(message) {
   if (pendingImages.length > 0) {
     console.log(`${c.dim}  Including ${pendingImages.length} image(s)${c.reset}`);
 
-    // Analyze images with Gemini if available
-    if (visionAnalyzer.isEnabled()) {
+    if (modelRegistry.currentSupportsVision()) {
+      // Local vision model - images will be sent directly as multimodal content
+      console.log(`${c.green}  ✓ Using local vision model${c.reset}`);
+    } else if (visionAnalyzer.isEnabled()) {
+      // Gemini fallback - convert images to text analysis
       console.log(`${c.cyan}  🔍 Analyzing image(s) with Gemini...${c.reset}`);
       const analysis = await visionAnalyzer.analyzeImages(pendingImages, message);
       if (analysis) {
@@ -930,7 +1070,7 @@ async function sendMessage(message) {
         console.log(`${c.yellow}  ⚠ Image analysis failed, sending without description${c.reset}`);
       }
     } else {
-      console.log(`${c.yellow}  ⚠ No Gemini API key - use /set geminiApiKey YOUR_KEY then restart${c.reset}`);
+      console.log(`${c.yellow}  ⚠ No vision capability (load a vision model or set GEMINI_API_KEY)${c.reset}`);
     }
   }
 
@@ -943,79 +1083,41 @@ async function sendMessage(message) {
     systemNote = '\n\n[USER PREFERENCE: Be concise. Shorter explanations, focus on code changes.]';
   }
 
-  const agenticMode = config.get('agenticMode');
-  let fullMessage;
-
-  if (agenticMode) {
-    // Agentic mode: minimal context, AI will request files as needed
-    const structure = contextBuilder.scanDirectory();
-    const fileList = [];
-    const collectFiles = (items, prefix = '') => {
-      for (const item of items) {
-        if (item.type === 'file') {
-          fileList.push(prefix + item.name);
-        } else if (item.children) {
-          collectFiles(item.children, prefix + item.name + '/');
-        }
+  // Always agentic: send a file list, let the model read what it needs
+  const structure = contextBuilder.scanDirectory();
+  const fileList = [];
+  const collectFiles = (items, prefix = '') => {
+    for (const item of items) {
+      if (item.type === 'file') {
+        fileList.push(prefix + item.name);
+      } else if (item.children) {
+        collectFiles(item.children, prefix + item.name + '/');
       }
-    };
-    collectFiles(structure);
-
-    fullMessage = `## Project Overview\n\nYou are working in: ${projectDir}\n\nFiles available (use read_file tool to examine):\n${fileList.slice(0, 50).join('\n')}${fileList.length > 50 ? `\n... and ${fileList.length - 50} more files` : ''}`;
-
-    if (instructions) {
-      fullMessage += `\n\n## Project-Specific Instructions\n\n${instructions}`;
     }
+  };
+  collectFiles(structure);
 
-    if (imageAnalysis) {
-      fullMessage += `\n\n## Image Analysis\n\n${imageAnalysis}`;
-    }
+  let fullMessage = `## Project Overview\n\nWorking directory: ${projectDir}\n\nFiles available (use read_file to examine if needed):\n${fileList.slice(0, 20).join('\n')}${fileList.length > 20 ? `\n... and ${fileList.length - 20} more (use list_files to explore)` : ''}`;
 
-    fullMessage += `\n\n## User Request\n\n${message}${systemNote}`;
-  } else {
-    // Standard mode: send full context upfront
-    const context = contextBuilder.buildContext();
-
-    // Check token limit
-    const contextTokens = tokenCounter.estimateTokens(context);
-    const limit = tokenCounter.checkLimit(contextTokens);
-
-    if (limit.isWarning) {
-      console.log(`${c.yellow}  ⚠ Context is ${Math.round(limit.percentage * 100)}% of token limit${c.reset}`);
-    }
-
-    fullMessage = `## Current Project Context\n\n${context}`;
-
-    if (instructions) {
-      fullMessage += `\n\n## Project-Specific Instructions\n\n${instructions}`;
-    }
-
-    if (imageAnalysis) {
-      fullMessage += `\n\n## Image Analysis\n\n${imageAnalysis}`;
-    }
-
-    fullMessage += `\n\n## User Request\n\n${message}${systemNote}`;
+  if (instructions) {
+    fullMessage += `\n\n## Project Instructions\n\n${instructions.content}`;
   }
 
-  const apiUrl = config.get('apiUrl');
-  const streamingEnabled = config.get('streamingEnabled');
+  if (imageAnalysis) {
+    fullMessage += `\n\n## Image Analysis\n\n${imageAnalysis}`;
+  }
+
+  fullMessage += `\n\n## Request\n\n${message}${systemNote}`;
 
   try {
-    if (agenticMode) {
-      // Agentic mode: AI can read files and explore on demand
-      await sendAgenticMessage(fullMessage, apiUrl, pendingImages, message);
-    } else if (streamingEnabled) {
-      await sendStreamingMessage(fullMessage, apiUrl, pendingImages, message);
-    } else {
-      await sendNonStreamingMessage(fullMessage, apiUrl, pendingImages, message);
-    }
+    await sendAgenticMessage(fullMessage, pendingImages, message);
   } catch (error) {
     console.log(`\n${c.red}  ✗ Error: ${error.message}${c.reset}`);
-    console.log(`${c.dim}    Make sure the AI Router is running at ${apiUrl}${c.reset}\n`);
+    console.log(`${c.dim}    Make sure LM Studio is running at ${lmStudio.baseUrl}${c.reset}\n`);
   }
 }
 
-async function sendStreamingMessage(message, apiUrl, images = [], rawMessage = '') {
+async function sendStreamingMessage(message, images = [], rawMessage = '') {
   // Fun thinking messages that rotate while generating
   const thinkingMessages = [
     'Brewing some code...',
@@ -1108,31 +1210,29 @@ async function sendStreamingMessage(message, apiUrl, images = [], rawMessage = '
   };
 
   // Determine which prompt to use
-  // Priority: plan mode > promptOverride > interaction mode defaults
   let promptMode;
-  if (interactionMode === 'plan') {
-    promptMode = 'plan'; // Use plan prompt for planning mode
-  } else if (promptOverride) {
-    promptMode = promptOverride;
+  if (interactionMode === 'plan' && promptManager.has('plan')) {
+    promptMode = 'plan';
   } else if (interactionMode === 'ask') {
     promptMode = 'base';
   } else {
-    promptMode = null; // Let router auto-detect based on message content
+    promptMode = activePrompt;
   }
 
-  const body = {
-    message,
-    rawMessage, // User's actual input for mode detection
-    conversationHistory
-  };
-
-  // Only send mode if explicitly set (otherwise router auto-detects)
-  if (promptMode) {
-    body.mode = promptMode;
+  // Build messages array for LM Studio
+  const messages = [];
+  const systemPrompt = promptManager.get(promptMode);
+  if (systemPrompt) {
+    messages.push({ role: 'system', content: systemPrompt });
   }
+  messages.push(...conversationHistory);
 
-  // Note: Images are analyzed by Gemini and included as text in the message
-  // We don't send raw images to the AI Router (local LLM can't handle them)
+  // Handle vision: if current model supports vision and we have images, use multimodal
+  if (images.length > 0 && modelRegistry.currentSupportsVision()) {
+    messages.push(visionAnalyzer.buildMultimodalMessage(message, images));
+  } else {
+    messages.push({ role: 'user', content: message });
+  }
 
   // Create abort controller for this request
   currentAbortController = new AbortController();
@@ -1140,18 +1240,10 @@ async function sendStreamingMessage(message, apiUrl, images = [], rawMessage = '
   // Start the fun thinking animation
   startThinking();
 
-  const response = await fetch(`${apiUrl}/api/chat/stream`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+  const response = await lmStudio.chatStream(messages, {
+    model: modelRegistry.getCurrentId(),
     signal: currentAbortController.signal
   });
-
-  if (!response.ok) {
-    stopStatus();
-    currentAbortController = null;
-    throw new Error(`Server error: ${response.status}`);
-  }
 
   let fullResponse = '';
   let firstTokenReceived = false;
@@ -1221,20 +1313,25 @@ async function sendStreamingMessage(message, apiUrl, images = [], rawMessage = '
   await processAIResponse(fullResponse, message);
 }
 
-async function sendAgenticMessage(message, apiUrl, images = [], rawMessage = '') {
-  const { renderMarkdown } = require('./lib/markdownRenderer');
+async function sendAgenticMessage(message, images = [], rawMessage = '') {
+  const markdownRenderer = new MarkdownRenderer();
+  const wordWrapper = new StreamingWordWrapper();
 
-  // Agentic messages for tool calls
   const toolMessages = {
     read_file: '📖 Reading',
     list_files: '📁 Listing',
-    search_code: '🔍 Searching'
+    search_code: '🔍 Searching',
+    create_file: '✍️  Writing',
+    edit_file: '✏️  Editing',
+    run_command: '⚡ Running'
   };
 
   const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let spinnerIndex = 0;
   let statusInterval = null;
   let currentStatus = 'Thinking...';
+  let toolCallsDisplayed = [];
+  let streamingStarted = false;
 
   const updateSpinner = () => {
     spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
@@ -1257,133 +1354,116 @@ async function sendAgenticMessage(message, apiUrl, images = [], rawMessage = '')
     process.stdout.cursorTo(0);
   };
 
-  // Determine prompt mode
+  // Determine prompt
   let promptMode;
-  if (interactionMode === 'plan') {
+  if (interactionMode === 'plan' && promptManager.has('plan')) {
     promptMode = 'plan';
-  } else if (interactionMode === 'ask') {
-    promptMode = 'base';
+  } else if (promptManager.has('code-agent')) {
+    promptMode = 'code-agent';
   } else {
-    promptMode = null;
+    promptMode = activePrompt;
   }
 
-  const body = {
-    message,
-    rawMessage,
-    conversationHistory,
-    projectDir // Send project directory for tool execution
-  };
+  // Build messages array
+  const messages = [];
+  const systemPrompt = promptManager.get(promptMode);
+  if (systemPrompt) {
+    messages.push({ role: 'system', content: systemPrompt });
+  }
+  messages.push(...conversationHistory);
 
-  if (promptMode) {
-    body.mode = promptMode;
+  if (images.length > 0 && modelRegistry.currentSupportsVision()) {
+    messages.push(visionAnalyzer.buildMultimodalMessage(message, images));
+  } else {
+    messages.push({ role: 'user', content: message });
   }
 
-  currentAbortController = new AbortController();
   startSpinner();
 
   try {
-    const response = await fetch(`${apiUrl}/api/chat/agentic`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: currentAbortController.signal
+    const runner = new AgenticRunner(lmStudio, {
+      onToolCall: (tool, args) => {
+        const toolMsg = toolMessages[tool] || '🔧 Using';
+        const detail = args.path || args.pattern || args.command || '';
+        currentStatus = `${toolMsg} ${detail}...`;
+        updateSpinner();
+        toolCallsDisplayed.push({ tool, args });
+      },
+      onToolResult: (tool, success) => {
+        // Spinner continues
+      },
+      onToken: (token) => {
+        // First token: stop spinner, print header, start streaming
+        if (!streamingStarted) {
+          streamingStarted = true;
+          stopSpinner();
+
+          // Show tool call summary
+          if (toolCallsDisplayed.length > 0) {
+            console.log(`${c.dim}┌─ ${toolCallsDisplayed.length} action(s)${c.reset}`);
+            for (const tc of toolCallsDisplayed) {
+              const icon = toolMessages[tc.tool]?.split(' ')[0] || '🔧';
+              console.log(`${c.dim}│ ${icon} ${tc.args.path || tc.args.pattern || tc.args.command || tc.tool}${c.reset}`);
+            }
+            console.log(`${c.dim}└─${c.reset}`);
+          }
+
+          process.stdout.write(`${c.cyan}Ripley →${c.reset} `);
+        }
+
+        // Strip leading think blocks from stream (they arrive token by token)
+        const rendered = markdownRenderer.render(token);
+        const wrapped = wordWrapper.write(rendered);
+        if (wrapped) process.stdout.write(wrapped);
+      },
+      onContent: (content) => {
+        // Flush remaining markdown/word buffer
+        const mdRemaining = markdownRenderer.flush();
+        if (mdRemaining) {
+          const wrapped = wordWrapper.write(mdRemaining);
+          if (wrapped) process.stdout.write(wrapped);
+        }
+        const remaining = wordWrapper.flush();
+        if (remaining) process.stdout.write(remaining);
+
+        if (!streamingStarted) {
+          // Edge case: empty response, no tokens fired
+          stopSpinner();
+        }
+      },
+      onReasoning: (reasoning) => {
+        stopSpinner();
+        console.log(`${c.dim}┌─ 🧠 Reasoning${c.reset}`);
+        const lines = reasoning.trim().split('\n');
+        for (const line of lines) {
+          console.log(`${c.dim}│ ${line}${c.reset}`);
+        }
+        console.log(`${c.dim}└─${c.reset}\n`);
+      },
+      onWarning: (msg) => {
+        console.log(`\n${c.yellow}  ⚠ ${msg}${c.reset}`);
+      }
     });
 
-    if (!response.ok) {
-      stopSpinner();
-      throw new Error(`Server error: ${response.status}`);
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let fullResponse = '';
-    let toolCallsDisplayed = [];
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6);
-
-        if (data === '[DONE]') continue;
-
-        try {
-          const event = JSON.parse(data);
-
-          if (event.type === 'tool_call') {
-            // Display tool call
-            const toolMsg = toolMessages[event.tool] || '🔧 Using';
-            currentStatus = `${toolMsg} ${event.args.path || event.args.pattern || ''}...`;
-            updateSpinner();
-
-            toolCallsDisplayed.push({
-              tool: event.tool,
-              args: event.args
-            });
-          } else if (event.type === 'tool_result') {
-            // Tool completed
-            const icon = event.success ? c.green + '✓' : c.red + '✗';
-            // Show brief result (will be cleared by next spinner update)
-          } else if (event.type === 'content') {
-            // Final response
-            stopSpinner();
-
-            // Filter out thinking blocks from response
-            let content = event.content;
-            // Remove <think>...</think> blocks
-            content = content.replace(/<think>[\s\S]*?<\/think>/gi, '');
-            // Remove <thinking>...</thinking> blocks
-            content = content.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
-            // Remove orphan </think> with everything before it (model reasoning without opening tag)
-            content = content.replace(/^[\s\S]*?<\/think>\s*/i, '');
-            content = content.replace(/^[\s\S]*?<\/thinking>\s*/i, '');
-            content = content.trim();
-
-            // Show tool calls summary if any
-            if (toolCallsDisplayed.length > 0) {
-              console.log(`${c.dim}┌─ Analyzed ${toolCallsDisplayed.length} file(s)${c.reset}`);
-              for (const tc of toolCallsDisplayed) {
-                const icon = toolMessages[tc.tool]?.split(' ')[0] || '🔧';
-                console.log(`${c.dim}│ ${icon} ${tc.args.path || tc.args.pattern || tc.tool}${c.reset}`);
-              }
-              console.log(`${c.dim}└─${c.reset}\n`);
-            }
-
-            console.log(`${c.cyan}Ripley →${c.reset} `);
-            console.log(renderMarkdown(content));
-            fullResponse = content;
-          } else if (event.error) {
-            stopSpinner();
-            console.log(`\n${c.red}  Error: ${event.error}${c.reset}`);
-            if (event.details) {
-              console.log(`${c.dim}  ${event.details}${c.reset}`);
-            }
-          }
-        } catch {
-          // Not JSON, ignore
-        }
-      }
-    }
+    const fullResponse = await runner.run(messages, projectDir, {
+      model: modelRegistry.getCurrentId(),
+      thinking: thinkingMode && modelRegistry.currentSupportsThinking()
+    });
 
     stopSpinner();
-    currentAbortController = null;
     console.log('\n');
 
     if (fullResponse) {
-      await processAIResponse(fullResponse, message);
+      let cleaned = fullResponse;
+      cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '');
+      cleaned = cleaned.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+      cleaned = cleaned.replace(/^[\s\S]*?<\/think>\s*/i, '');
+      cleaned = cleaned.replace(/^[\s\S]*?<\/thinking>\s*/i, '');
+      await processAIResponse(cleaned.trim(), rawMessage || message);
     }
 
   } catch (error) {
     stopSpinner();
-    currentAbortController = null;
-
     if (error.name === 'AbortError') {
       return;
     }
@@ -1391,7 +1471,7 @@ async function sendAgenticMessage(message, apiUrl, images = [], rawMessage = '')
   }
 }
 
-async function sendNonStreamingMessage(message, apiUrl, images = [], rawMessage = '') {
+async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   const modeColors = { code: c.cyan, plan: c.cyan, ask: c.magenta };
   let i = 0;
@@ -1401,37 +1481,44 @@ async function sendNonStreamingMessage(message, apiUrl, images = [], rawMessage 
   }, 80);
 
   try {
-    const body = {
-      message,
-      rawMessage, // User's actual input for mode detection
-      mode: interactionMode === 'ask' ? 'base' : null, // Let router auto-detect unless ask mode
-      conversationHistory
-    };
+    // Determine prompt
+    let promptMode;
+    if (interactionMode === 'ask') {
+      promptMode = 'base';
+    } else {
+      promptMode = activePrompt;
+    }
 
-    // Note: Images are analyzed by Gemini and included as text in the message
-    // We don't send raw images to the AI Router (local LLM can't handle them)
+    // Build messages array
+    const messages = [];
+    const systemPrompt = promptManager.get(promptMode);
+    if (systemPrompt) {
+      messages.push({ role: 'system', content: systemPrompt });
+    }
+    messages.push(...conversationHistory);
 
-    const response = await fetch(`${apiUrl}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+    // Handle vision
+    if (images.length > 0 && modelRegistry.currentSupportsVision()) {
+      messages.push(visionAnalyzer.buildMultimodalMessage(message, images));
+    } else {
+      messages.push({ role: 'user', content: message });
+    }
+
+    const data = await lmStudio.chat(messages, {
+      model: modelRegistry.getCurrentId()
     });
 
     clearInterval(spinner);
     process.stdout.write('\r' + ' '.repeat(50) + '\r');
 
-    if (!response.ok) {
-      throw new Error(`Server error: ${response.status}`);
-    }
-
-    const data = await response.json();
+    const reply = data.choices?.[0]?.message?.content || '';
 
     const { renderMarkdown } = require('./lib/markdownRenderer');
     console.log(`\n${c.cyan}Ripley →${c.reset} `);
-    console.log(renderMarkdown(data.reply));
+    console.log(renderMarkdown(reply));
     console.log();
 
-    await processAIResponse(data.reply, message);
+    await processAIResponse(reply, message);
 
   } catch (error) {
     clearInterval(spinner);
@@ -1498,10 +1585,18 @@ async function processAIResponse(reply, originalMessage) {
   conversationHistory.push({ role: 'user', content: originalMessage });
   conversationHistory.push({ role: 'assistant', content: reply });
 
-  // Trim history if too long
-  const historyLimit = config.get('historyLimit') || 50;
-  if (conversationHistory.length > historyLimit) {
-    conversationHistory = conversationHistory.slice(-historyLimit);
+  // Auto-compact if context usage hits 80%+
+  const historyText = conversationHistory.map(m => m.content || '').join(' ');
+  const usedTokens = tokenCounter.estimateTokens(historyText);
+  const ctxLimit = modelRegistry.getContextLimit();
+  if (usedTokens / ctxLimit >= 0.80) {
+    await compactHistory();
+  } else {
+    // Trim history if too long (safety fallback)
+    const historyLimit = config.get('historyLimit') || 50;
+    if (conversationHistory.length > historyLimit) {
+      conversationHistory = conversationHistory.slice(-historyLimit);
+    }
   }
 
 }
@@ -1904,7 +1999,7 @@ Examples:
       const cfg = new Config(projectDir);
       cfg.createDefaultInstructions();
       console.log(`${c.green}✓ Initialized Ripley in ${projectDir}${c.reset}`);
-      console.log(`${c.dim}  Edit .ripley/instructions.md to customize AI behavior${c.reset}`);
+      console.log(`${c.dim}  Edit RIPLEY.md to customize AI behavior${c.reset}`);
     } else {
       console.log(`${c.yellow}Ripley already initialized${c.reset}`);
     }
@@ -1944,13 +2039,31 @@ Examples:
   }
 
   // Interactive mode
+  const getContextPercent = () => {
+    // Estimate tokens in current conversation history
+    const historyText = conversationHistory.map(m => m.content || '').join(' ');
+    const usedTokens = tokenCounter.estimateTokens(historyText);
+    const limit = modelRegistry.getContextLimit();
+    const pct = Math.min(100, Math.round((usedTokens / limit) * 100));
+
+    // Color code: green < 50%, yellow 50-79%, red 80%+
+    let color = c.green;
+    if (pct >= 80) color = c.red;
+    else if (pct >= 50) color = c.yellow;
+
+    return `${color}${pct}%${c.reset}`;
+  };
+
   const getPromptPrefix = () => {
     const modeIndicators = {
       code: `${c.green}⚡${c.reset}`,
       plan: `${c.cyan}📋${c.reset}`,
       ask: `${c.magenta}💬${c.reset}`
     };
-    return `${modeIndicators[interactionMode]} ${c.orange}You → ${c.reset}`;
+    const modelName = modelRegistry.getCurrent() || '?';
+    const ctxPct = getContextPercent();
+    const thinkIndicator = (thinkingMode && modelRegistry.currentSupportsThinking()) ? ` ${c.cyan}🧠${c.reset}` : '';
+    return `${modeIndicators[interactionMode]} ${c.dim}[${modelName}]${c.reset}${thinkIndicator} ${c.dim}ctx:${c.reset}${ctxPct} ${c.orange}You → ${c.reset}`;
   };
 
   const prompt = () => {

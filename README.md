@@ -1,71 +1,32 @@
 # Ripley Code
 
-A powerful local AI coding agent that runs on your own hardware using Qwen 2.5 Coder via LM Studio. Think Claude Code, but completely local and private.
+A powerful local AI coding agent that runs on your own hardware. Direct connection to LM Studio - no middleware needed. Think Claude Code, but completely local and private.
 
-## What's New in v3.0.0
+## What's New in v4.0.0
 
-- **Streaming responses** — Watch AI responses appear in real-time
-- **Command history** — Use up/down arrows to navigate previous commands
-- **Tab completion** — Complete commands, file paths, and @ mentions
-- **Token tracking** — See token counts and get limit warnings
-- **Image support** — Send screenshots to vision models
-- **Watch mode** — Auto-reload files when they change on disk
-- **Conversation persistence** — Save and load chat sessions
-- **Project instructions** — Custom AI instructions per project
-- **Config files** — Persistent settings via `.ripley/config.json`
-- **Improved diffs** — Better multi-file change batching with summaries
-
-## Features
-
-### Core Capabilities
-- **Read project files** — Loads files into context so AI understands your codebase
-- **Write/edit files** — AI can create new files or modify existing ones
-- **@ mentions** — Use `@filename` to quickly add files to context
-- **Run shell commands** — Execute npm, git, and other terminal commands
-- **Show diffs** — See colorful diffs before applying changes
-- **Git integration** — Quick status, diff, and log commands
-- **Search** — Find files and grep through code
-- **Undo changes** — All edits are backed up and can be restored
-
-### Power Features
-- **Streaming** — Real-time response streaming with typing effect
-- **Command history** — Navigate with ↑/↓ arrows, persisted across sessions
-- **Tab completion** — Auto-complete commands, `/read` paths, and `@` mentions
-- **Token tracking** — Monitor context size with limit warnings
-- **Image support** — Send screenshots/images to vision-capable models
-- **Watch mode** — Files auto-reload when changed externally
-- **Session management** — Save, load, and list conversation sessions
-- **Project config** — Custom settings and instructions per project
+- **Direct to LM Studio** - No more AI Router middleware. One process, one connection.
+- **Named model profiles** - 7 models with friendly names and `/model` switching
+- **Auto-discovery** - Model IDs detected from LM Studio on startup
+- **Local vision** - Send images directly to vision models (Qwen3 VL)
+- **Extensible prompts** - Drop `.md` files in `prompts/` for custom system prompts
+- **Agentic mode built-in** - Tool-calling loop runs locally (read_file, list_files, search_code)
+- **Model shown in prompt** - `[nemotron] You →` so you always know what model you're using
 
 ## Prerequisites
 
-1. **LM Studio** running with Qwen 2.5 Coder 14B on `localhost:1234`
-2. **AI Router** running on `localhost:3000`
+1. **LM Studio** running on `localhost:1234` with any model loaded
+2. **Node.js** 18+
 
 ## Installation
 
 ```bash
-cd C:\ripley-code
+git clone https://github.com/mrchevyceleb/ripley-code.git
+cd ripley-code
 npm install
 npm link --force  # Makes 'ripley' command available globally
 ```
 
-### Installing on Other Computers
-
-**Option 1: Clone from GitHub**
-```bash
-git clone https://github.com/mrchevyceleb/ripley-code.git
-cd ripley-code
-npm install
-npm link --force
-```
-
-**Option 2: Copy files**
-Copy the entire `ripley-code` folder, then run `npm install && npm link --force`
-
 ## Usage
-
-### Interactive Mode
 
 ```bash
 cd your-project
@@ -78,18 +39,46 @@ ripley
 ripley "Add a dark mode toggle to the header"
 ```
 
-### @ Mentions (Quick File Loading)
+### YOLO Mode (auto-apply all changes)
 
-Reference files directly in your message:
-
-```
-Fix the bug in @src/api/auth.ts
+```bash
+ripley yolo
 ```
 
-Glob patterns work too:
+## Model Switching
+
+Switch between models with friendly names:
 
 ```
-Review @src/components/*.tsx for performance issues
+/model              Show all models
+/model nemotron     Switch to Nemotron (daily driver)
+/model coder        Switch to Qwen2.5 Coder 32B
+/model max          Switch to 80B max quality (slow)
+/model vision       Switch to Qwen3 VL 30B
+/model vision-fast  Switch to Qwen3 VL 8B
+/model chat         Switch to GPT-OSS 20B
+/model mistral      Switch to Mistral Small 24B
+```
+
+Model choice persists across sessions. The active model shows in your prompt:
+
+```
+⚡ [nemotron] You → fix the auth bug
+⚡ [coder] You → refactor this whole module
+```
+
+## Prompt System
+
+Ripley ships with two prompts:
+
+- `base` - General coding assistant (default)
+- `code-agent` - Optimized for agentic tool-calling mode
+
+Add custom prompts by dropping `.md` files in the `prompts/` directory:
+
+```
+/prompt             Show available prompts
+/prompt base        Switch to base prompt
 ```
 
 ## Commands
@@ -99,261 +88,118 @@ Review @src/components/*.tsx for performance issues
 | Command | Description |
 |---------|-------------|
 | `/files` | List files currently in context |
-| `/read <path>` | Add file to context (supports globs: `*.tsx`) |
+| `/read <path>` | Add file to context (supports globs) |
 | `/unread <path>` | Remove file from context |
 | `/tree` | Show project structure |
 | `/find <pattern>` | Find files matching pattern |
-| `/grep <text>` | Search for text in all source files |
+| `/grep <text>` | Search for text in files |
+| `/image <path>` | Add image (vision model or Gemini fallback) |
 
-### Git Commands
-
-| Command | Description |
-|---------|-------------|
-| `/git` | Show git status |
-| `/diff` | Show uncommitted changes |
-| `/log` | Show recent commits |
-
-### Session Commands
+### Mode Commands
 
 | Command | Description |
 |---------|-------------|
-| `/clear` | Clear conversation & reset context |
-| `/clearhistory` | Clear conversation only (keep files) |
-| `/context` | Show context size & token estimate |
-| `/compact` | Toggle compact mode (shorter responses) |
-| `/save [name]` | Save conversation to a session file |
-| `/load [name]` | Load a saved conversation session |
-| `/sessions` | List all saved sessions |
+| `/plan` | Toggle PLAN mode (preview only) |
+| `/ask` | Toggle ASK mode (questions only) |
+| `/yolo` | Toggle YOLO mode (auto-apply) |
+| `/agent` | Toggle agentic mode (AI reads files on demand) |
+| `/model [name]` | Show/switch model |
+| `/prompt [name]` | Show/switch system prompt |
 
-### Configuration Commands
-
-| Command | Description |
-|---------|-------------|
-| `/config` | Show current configuration |
-| `/set <key> <value>` | Set a configuration value |
-| `/instructions` | Show project-specific instructions |
-| `/tokens` | Show token usage for this session |
-
-### Streaming & Watch
+### Git, Session, Config, System
 
 | Command | Description |
 |---------|-------------|
-| `/stream` | Toggle streaming mode on/off |
-| `/watch` | Toggle file watch mode on/off |
-
-### Image Support
-
-| Command | Description |
-|---------|-------------|
-| `/image <path>` | Add an image to the next message |
-
-### System Commands
-
-| Command | Description |
-|---------|-------------|
-| `/run <cmd>` | Run a shell command |
-| `/undo` | Show recent backups |
-| `/restore <path>` | Restore last backup of a file |
-| `/help` | Show all commands |
-| `/exit` | Exit Ripley |
-
-## Configuration
-
-Ripley stores configuration in `.ripley/config.json` in your project root.
-
-### Available Settings
-
-```json
-{
-  "apiUrl": "http://localhost:3000",
-  "streaming": true,
-  "compact": false,
-  "tokenLimit": 16000,
-  "autoSave": true,
-  "watchMode": false
-}
-```
-
-### Setting Values
-
-```bash
-/set streaming true
-/set tokenLimit 32000
-/set compact false
-```
-
-## Project Instructions
-
-Create `.ripley/instructions.md` in your project root to give Ripley project-specific context:
-
-```markdown
-# Project: My Awesome App
-
-## Tech Stack
-- React 18 with TypeScript
-- Tailwind CSS
-- Supabase for backend
-
-## Coding Standards
-- Use functional components with hooks
-- Prefer named exports
-- Use `const` by default
-
-## Important Notes
-- The API base URL is in `src/config.ts`
-- Auth logic is in `src/hooks/useAuth.ts`
-```
-
-Ripley will automatically include these instructions in every request.
+| `/git` | Git status |
+| `/diff` | Uncommitted changes |
+| `/log` | Recent commits |
+| `/clear` | Clear conversation & context |
+| `/save <name>` | Save session |
+| `/load <name>` | Load session |
+| `/config` | Show configuration |
+| `/run <cmd>` | Run shell command |
+| `/undo` | Show backups |
+| `/restore <path>` | Restore from backup |
+| `/help` | All commands |
 
 ## Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` | Navigate command history |
-| `Tab` | Auto-complete commands/files |
-| `Ctrl+C` | Cancel current operation |
-| `Ctrl+D` | Exit Ripley |
-
-## How It Works
-
-1. **Scans your project** — Reads package.json, tsconfig.json, and other config files
-2. **Loads instructions** — Includes `.ripley/instructions.md` if present
-3. **Builds context** — Creates a summary of your project structure
-4. **Handles @ mentions** — Auto-loads any files you reference with `@`
-5. **Sends to AI** — Your request + context goes to the AI Router
-6. **Streams response** — Shows AI response in real-time (if enabled)
-7. **Parses response** — Extracts file operations and commands from AI output
-8. **Shows diffs** — Displays batched changes with summary before applying
-9. **Applies with confirmation** — Only writes files after you approve
+| `Tab` | Auto-complete |
+| `Shift+Tab` | Cycle modes (code → plan → ask) |
+| `Alt+V` | Paste screenshot from clipboard |
+| `Escape` | Cancel current request |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  RIPLEY CODE CLI v3.0.0 (localhost)                         │
-│  ├── ripley.js           — Main CLI interface               │
-│  ├── lib/                                                   │
-│  │   ├── fileManager.js    — Read/write/backup files        │
-│  │   ├── contextBuilder.js — Build project context          │
-│  │   ├── commandRunner.js  — Execute shell commands         │
-│  │   ├── diffViewer.js     — Show pretty diffs              │
-│  │   ├── parser.js         — Parse AI file operations       │
-│  │   ├── config.js         — Configuration management       │
-│  │   ├── streamHandler.js  — SSE streaming support          │
-│  │   ├── historyManager.js — Command history                │
-│  │   ├── completer.js      — Tab completion                 │
-│  │   ├── tokenCounter.js   — Token counting & limits        │
-│  │   ├── watcher.js        — File change watching           │
-│  │   └── imageHandler.js   — Image/screenshot support       │
-└─────────────────────────────────────────────────────────────┘
-                         │
-                         ▼ HTTP POST / SSE Stream
-┌─────────────────────────────────────────────────────────────┐
-│  AI ROUTER (localhost:3000)                                  │
-│  — Routes requests to LM Studio with system prompts          │
-│  — Supports streaming via Server-Sent Events                 │
-└─────────────────────────────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│  LM STUDIO (localhost:1234)                                  │
-│  — Qwen 2.5 Coder 14B on 4090 GPU                            │
-│  — Or any compatible local model                             │
-└─────────────────────────────────────────────────────────────┘
+Ripley Code v4.0.0  ──────────▶  LM Studio (localhost:1234)
+├── ripley.js                     Any local model
+├── models.json
+├── prompts/
+│   ├── base.md
+│   └── code-agent.md
+└── lib/
+    ├── lmStudio.js       Direct API client
+    ├── modelRegistry.js   Model switching
+    ├── promptManager.js   Prompt loading
+    ├── agenticRunner.js   Tool-calling loop
+    ├── streamHandler.js   SSE processing
+    ├── visionAnalyzer.js  Vision + Gemini fallback
+    └── [9 more modules]
 ```
 
-## File Context Strategy
+## Vision Support
 
-Ripley is smart about what it loads:
+When a vision model is loaded (`/model vision` or `/model vision-fast`):
+- Images are sent directly to LM Studio as multimodal content
+- Supports clipboard paste (`Alt+V`) and file path (`/image screenshot.png`)
 
-- **Always reads:** package.json, tsconfig.json, README.md, config files
-- **@ mentions:** Instantly load files referenced in your message
-- **Glob support:** Use patterns like `@src/**/*.tsx`
-- **Scans structure:** Gets folder tree (ignores node_modules, .git, etc.)
-- **Size limits:** Skips files > 100KB and binary files
-- **Respects .gitignore:** Ignores patterns from your gitignore
+When a non-vision model is loaded:
+- Falls back to Gemini API to convert images to text descriptions
+- Requires `GEMINI_API_KEY` or `GOOGLE_API_KEY` environment variable
 
-## Token Management
+## Project Instructions
 
-Ripley tracks token usage to help you stay within model limits:
+Create `RIPLEY.md` in your project root for project-specific AI context (like CLAUDE.md for Claude Code):
 
-- `/tokens` — View current session token usage
-- `/context` — See context size estimate
-- Automatic warnings when approaching limits
-- Configurable token limit via `/set tokenLimit <value>`
+```markdown
+# RIPLEY.md
 
-## Watch Mode
+This file provides project-specific instructions to Ripley Code.
 
-Enable watch mode to auto-reload files when they change:
-
-```bash
-/watch
+## Project Overview
+- React 18 with TypeScript
+- Use functional components
+- API is in src/api/
 ```
 
-When enabled, any files in your context that change on disk will be automatically reloaded. Great for:
-- Working with hot-reload dev servers
-- Editing files in your IDE while chatting
-- Keeping context fresh during development
-
-## Session Persistence
-
-Save your conversation to continue later:
-
-```bash
-/save my-feature      # Save current session
-/sessions             # List all saved sessions
-/load my-feature      # Load a saved session
-```
-
-Sessions are stored in `.ripley/sessions/` and include:
-- Full conversation history
-- Loaded files
-- Configuration state
-
-## Backups
-
-All file changes are automatically backed up to `.ripley/backups/` with timestamps.
-
-- `/undo` — See recent backups
-- `/restore <path>` — Restore a file to its last backup
+Also supports the legacy `.ripley/instructions.md` as a fallback.
 
 ## Environment Variables
 
-- `RIPLEY_API_URL` — AI Router URL (default: `http://localhost:3000`)
-
-## Tips
-
-- Use `/compact` for shorter AI responses
-- Use `/stream` for real-time response streaming
-- Use `/context` to check token usage before big requests
-- Use `/grep` to find where something is used before asking AI to change it
-- Reference files with `@` instead of manually using `/read`
-- Create `.ripley/instructions.md` for project-specific AI guidance
-- Use `/save` before experimenting with big changes
-- Enable `/watch` when actively developing
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `RIPLEY_LM_STUDIO_URL` | LM Studio URL | `http://localhost:1234` |
+| `GEMINI_API_KEY` | Gemini vision fallback | — |
 
 ## Changelog
 
-### v3.0.0
-- Added streaming responses with SSE support
-- Added command history with up/down arrow navigation
-- Added tab completion for commands and file paths
-- Added token tracking with limit warnings
-- Added image/screenshot support for vision models
-- Added file watch mode for auto-reload
-- Added conversation save/load persistence
-- Added project-specific instructions support
-- Added configuration file support
-- Improved multi-file diff batching with summaries
-- Better error handling and recovery
+### v4.0.0
+- Direct LM Studio connection (removed AI Router dependency)
+- Named model profiles with `/model` switching
+- Auto-discovery of model IDs from LM Studio
+- Local vision model support with Gemini fallback
+- Extensible prompt system (drop .md files in prompts/)
+- Agentic tool-calling loop runs locally
+- Model name shown in prompt prefix
 
-### v2.0.0
-- Initial public release
-- File management with @ mentions
-- Git integration
-- Backup/restore system
-- Diff viewing
+### v3.0.0
+- Streaming responses, command history, tab completion
+- Token tracking, image support, watch mode
+- Session persistence, project instructions
 
 ## License
 

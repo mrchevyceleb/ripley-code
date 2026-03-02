@@ -1,0 +1,54 @@
+{
+  "default": "gpt-oss",
+  "models": {
+    "gpt-oss": {
+      "name": "GPT-OSS 20B",
+      "id": "openai/gpt-oss-20b",
+      "vram": "~12 GB",
+      "contextLimit": 32768,
+      "supportsThinking": true,
+      "tags": ["fast", "agentic", "coding", "tool-calling"],
+      "description": "Daily driver. Best open tool-calling model. Fast, dense, low VRAM."
+    },
+    "glm": {
+      "name": "GLM 4.7 Flash",
+      "id": "zai-org/glm-4.7-flash",
+      "vram": "~5 GB",
+      "contextLimit": 131072,
+      "tags": ["fast", "chat"],
+      "description": "Fast lightweight model for quick queries and chat."
+    },
+    "coder": {
+      "name": "Qwen3 Coder 30B",
+      "id": "qwen/qwen3-coder-30b-a3b",
+      "vram": "~18 GB",
+      "contextLimit": 131072,
+      "tags": ["coding", "reasoning", "fast"],
+      "description": "Best local coding + reasoning model. MoE, 3B active params, fast."
+    },
+    "qwen35": {
+      "name": "Qwen3.5 35B A3B",
+      "id": "qwen/qwen3.5-35b-a3b",
+      "vram": "21 GB",
+      "contextLimit": 262144,
+      "tags": ["agentic", "coding", "reasoning"],
+      "description": "Big single-shot tasks. MoE, slow on multi-iteration agentic work."
+    },
+    "nemotron": {
+      "name": "Nemotron 3 Nano 30B",
+      "id": "nvidia/nemotron-3-nano",
+      "vram": "19.3 GB",
+      "contextLimit": 131072,
+      "tags": ["fast", "agentic", "coding"],
+      "description": "Older daily driver."
+    },
+    "max": {
+      "name": "Qwen3 Coder Next 80B",
+      "id": "qwen/qwen3-coder-next",
+      "vram": "45.2 GB",
+      "contextLimit": 131072,
+      "tags": ["coding", "max-quality"],
+      "description": "Maximum quality. Slow (spills to CPU RAM)."
+    }
+  }
+}

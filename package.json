@@ -1,7 +1,7 @@
 {
   "name": "ripley-code",
-  "version": "3.1.1",
-  "description": "Ripley Code - Your local AI coding agent with streaming, history, and more",
+  "version": "4.0.0",
+  "description": "Ripley Code - Local AI coding agent. Direct to LM Studio with model switching.",
   "main": "ripley.js",
   "bin": {
     "ripley": "./ripley.js"
