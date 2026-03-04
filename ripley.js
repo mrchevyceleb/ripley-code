@@ -2391,11 +2391,12 @@ Examples:
   };
 
   const flushPasteBuffer = async () => {
+    // Stop accepting lines while we process this input
+    waitingForInput = false;
     const fullInput = pasteBuffer.join('\n');
     const lineCount = pasteBuffer.length;
     pasteBuffer = [];
     pasteTimer = null;
-    waitingForInput = false;
 
     if (lineCount > 1) {
       console.log(`${c.dim}  (pasted ${lineCount} lines)${c.reset}`);
@@ -2405,6 +2406,11 @@ Examples:
   };
 
   const handleLine = (input) => {
+    // Only accept input when we're actually waiting for it.
+    // This prevents output from commands, model switching, pickers, etc.
+    // from being treated as user input.
+    if (!waitingForInput) return;
+
     pasteBuffer.push(input);
 
     // Reset the timer each time a new line arrives
