@@ -816,6 +816,46 @@ async function handleCommand(input) {
       }
       return true;
 
+    case '/ctx':
+      if (!args) {
+        const currentCtx = modelRegistry.getContextLimit();
+        console.log(`\n${c.cyan}  Context: ${(currentCtx / 1024).toFixed(0)}K${c.reset} ${c.dim}(${currentCtx.toLocaleString()} tokens)${c.reset}`);
+        console.log(`${c.dim}  Usage: /ctx 16k | /ctx 32k | /ctx 64k | /ctx 131072${c.reset}\n`);
+        return true;
+      }
+      // Parse context size: "16k", "32K", "65536", etc.
+      let newCtx;
+      const ctxMatch = args.trim().match(/^(\d+)\s*[kK]$/);
+      if (ctxMatch) {
+        newCtx = parseInt(ctxMatch[1]) * 1024;
+      } else {
+        newCtx = parseInt(args.trim());
+      }
+      if (!newCtx || isNaN(newCtx) || newCtx < 1024) {
+        console.log(`\n${c.red}  Invalid context size. Use: /ctx 16k, /ctx 32k, /ctx 131072${c.reset}\n`);
+        return true;
+      }
+      try {
+        const currentModelData = modelRegistry.getCurrentModel();
+        if (!currentModelData?.id) {
+          console.log(`\n${c.red}  No model loaded.${c.reset}\n`);
+          return true;
+        }
+        // Unload current model
+        console.log(`${c.dim}  Reloading ${currentModelData.name} with ${(newCtx / 1024).toFixed(0)}K context...${c.reset}`);
+        const loadedInstances = await lmStudio.getLoadedInstances();
+        for (const inst of loadedInstances) {
+          try { await lmStudio.unloadModel(inst.instanceId); } catch {}
+        }
+        // Reload with new context
+        const ctxResult = await lmStudio.loadModel(currentModelData.id, { contextLength: newCtx });
+        console.log(`${c.green}  ✓ Reloaded with ${(newCtx / 1024).toFixed(0)}K context${c.reset} ${c.dim}(${ctxResult.load_time_seconds?.toFixed(1)}s)${c.reset}\n`);
+      } catch (err) {
+        console.log(`\n${c.red}  Failed: ${err.message}${c.reset}`);
+        console.log(`${c.dim}  Try loading manually in LM Studio with reduced context${c.reset}\n`);
+      }
+      return true;
+
     case '/compact':
       const newCompact = !config.get('compactMode');
       config.set('compactMode', newCompact);
