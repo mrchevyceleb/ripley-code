@@ -2347,39 +2347,83 @@ Examples:
     return `${modeIndicators[interactionMode]} ${c.dim}[${modelName}]${c.reset}${thinkIndicator} ${c.dim}ctx:${c.reset}${ctxPct} ${c.orange}You → ${c.reset}`;
   };
 
+  // Paste detection: buffer rapid lines and combine them into one message.
+  // When pasting multi-line text, readline fires the callback for the first line,
+  // then subsequent lines arrive as new 'line' events. We detect paste by
+  // buffering lines that arrive within PASTE_DELAY_MS of each other.
+  const PASTE_DELAY_MS = 80;
+  let pasteBuffer = [];
+  let pasteTimer = null;
+  let waitingForInput = false;
+
+  const processInput = async (fullInput) => {
+    const trimmed = fullInput.trim();
+
+    if (!trimmed) {
+      showPrompt();
+      return;
+    }
+
+    // Add to history (first line only for multi-line pastes)
+    const firstLine = trimmed.split('\n')[0];
+    historyManager.add(firstLine.length > 80 ? firstLine.slice(0, 80) + '...' : firstLine);
+    historyManager.resetIndex();
+
+    // Handle bare "exit" or "quit" without slash
+    if (trimmed.toLowerCase() === 'exit' || trimmed.toLowerCase() === 'quit') {
+      await handleCommand('/exit');
+      return;
+    }
+
+    // Check for commands (only if single line - don't treat pasted text as commands)
+    if (trimmed.startsWith('/') && !trimmed.includes('\n')) {
+      const handled = await handleCommand(trimmed);
+      if (!handled) {
+        console.log(`\n${c.dim}  Unknown command. Type /help or /commands for available commands.${c.reset}\n`);
+      }
+      showPrompt();
+      return;
+    }
+
+    // Send message to AI
+    await sendMessage(trimmed);
+    showPrompt();
+  };
+
+  const flushPasteBuffer = async () => {
+    const fullInput = pasteBuffer.join('\n');
+    const lineCount = pasteBuffer.length;
+    pasteBuffer = [];
+    pasteTimer = null;
+    waitingForInput = false;
+
+    if (lineCount > 1) {
+      console.log(`${c.dim}  (pasted ${lineCount} lines)${c.reset}`);
+    }
+
+    await processInput(fullInput);
+  };
+
+  const handleLine = (input) => {
+    pasteBuffer.push(input);
+
+    // Reset the timer each time a new line arrives
+    if (pasteTimer) clearTimeout(pasteTimer);
+    pasteTimer = setTimeout(() => flushPasteBuffer(), PASTE_DELAY_MS);
+  };
+
+  const showPrompt = () => {
+    waitingForInput = true;
+    process.stdout.write(getPromptPrefix());
+  };
+
+  // Use 'line' event instead of rl.question() to catch all pasted lines
+  rl.on('line', (input) => {
+    handleLine(input);
+  });
+
   const prompt = () => {
-    rl.question(getPromptPrefix(), async (input) => {
-      const trimmed = input.trim();
-
-      if (!trimmed) {
-        prompt();
-        return;
-      }
-
-      // Add to history
-      historyManager.add(trimmed);
-      historyManager.resetIndex();
-
-      // Handle bare "exit" or "quit" without slash
-      if (trimmed.toLowerCase() === 'exit' || trimmed.toLowerCase() === 'quit') {
-        await handleCommand('/exit');
-        return; // Won't reach here since /exit calls process.exit(0)
-      }
-
-      // Check for commands
-      if (trimmed.startsWith('/')) {
-        const handled = await handleCommand(trimmed);
-        if (!handled) {
-          console.log(`\n${c.dim}  Unknown command. Type /help or /commands for available commands.${c.reset}\n`);
-        }
-        prompt();
-        return;
-      }
-
-      // Send message to AI
-      await sendMessage(trimmed);
-      prompt();
-    });
+    showPrompt();
   };
 
   prompt();
