@@ -42,6 +42,8 @@ const ModelRegistry = require('./lib/modelRegistry');
 const { AgenticRunner, setMcpClient } = require('./lib/agenticRunner');
 const McpClient = require('./lib/mcpClient');
 const { pick } = require('./lib/interactivePicker');
+const StatusBar = require('./lib/statusBar');
+const borderRenderer = require('./lib/borderRenderer');
 
 // =============================================================================
 // CONFIGURATION
@@ -69,6 +71,7 @@ let lmStudio = null;
 let promptManager = null;
 let modelRegistry = null;
 let mcpClient = null;
+let statusBar = null;
 let conversationHistory = [];
 let lastKnownTokens = 0; // Track actual token usage from API responses
 let rl = null;
@@ -365,9 +368,11 @@ async function loadMentionedFiles(message) {
 // =============================================================================
 
 class StreamingWordWrapper {
-  constructor(maxWidth = null) {
-    // Use terminal width minus padding on both sides
-    this.maxWidth = maxWidth || Math.max((process.stdout.columns || 80) - PAD.length * 2, 40);
+  constructor(maxWidth = null, linePrefix = PAD) {
+    this.linePrefix = linePrefix;
+    const prefixLen = borderRenderer.stripAnsi(linePrefix).length;
+    // Use terminal width minus prefix visual width and right padding
+    this.maxWidth = maxWidth || Math.max((process.stdout.columns || 80) - prefixLen - PAD.length, 40);
     this.currentLineLength = 0;
     this.wordBuffer = '';
   }
@@ -377,16 +382,16 @@ class StreamingWordWrapper {
 
     for (const char of text) {
       if (char === '\n') {
-        // Flush word buffer and reset line, pad next line
-        output += this.wordBuffer + '\n' + PAD;
+        // Flush word buffer and reset line, pad next line with border prefix
+        output += this.wordBuffer + '\n' + this.linePrefix;
         this.wordBuffer = '';
-        this.currentLineLength = PAD.length;
+        this.currentLineLength = borderRenderer.stripAnsi(this.linePrefix).length;
       } else if (char === ' ' || char === '\t') {
         // Word boundary - check if we need to wrap
         if (this.currentLineLength + this.wordBuffer.length + 1 > this.maxWidth && this.currentLineLength > 0) {
-          // Wrap to new line with padding
-          output += '\n' + PAD + this.wordBuffer + char;
-          this.currentLineLength = PAD.length + this.wordBuffer.length + 1;
+          // Wrap to new line with border prefix
+          output += '\n' + this.linePrefix + this.wordBuffer + char;
+          this.currentLineLength = borderRenderer.stripAnsi(this.linePrefix).length + this.wordBuffer.length + 1;
         } else {
           output += this.wordBuffer + char;
           this.currentLineLength += this.wordBuffer.length + 1;
@@ -726,6 +731,10 @@ async function handleCommand(input) {
       contextBuilder.loadPriorityFiles();
       tokenCounter.resetSession();
       imageHandler.clearPending();
+      if (statusBar) {
+        statusBar.update({ contextPct: 0, contextTokens: 0, sessionIn: 0, sessionOut: 0 });
+        statusBar.reinstall();
+      }
       console.log(`\n${PAD}${c.green}  ✓ Cleared conversation and reset context${c.reset}\n`);
       return true;
 
@@ -851,6 +860,7 @@ async function handleCommand(input) {
         // Reload with new context
         const ctxResult = await lmStudio.loadModel(currentModelData.id, { contextLength: newCtx });
         console.log(`${PAD}${c.green}✓ Reloaded with ${(newCtx / 1024).toFixed(0)}K context${c.reset} ${c.dim}(${ctxResult.load_time_seconds?.toFixed(1)}s)${c.reset}\n`);
+        if (statusBar) statusBar.update({ contextLimit: newCtx });
       } catch (err) {
         console.log(`\n${PAD}${c.red}Failed: ${err.message}${c.reset}`);
         console.log(`${PAD}${c.dim}Try loading manually in LM Studio with reduced context${c.reset}\n`);
@@ -1006,6 +1016,15 @@ async function handleCommand(input) {
 
         console.log(`${PAD}${c.green}✓ Model: ${switched.name}${c.reset} ${c.dim}(${switched.key})${c.reset}`);
 
+        // Update status bar
+        if (statusBar) {
+          statusBar.update({
+            modelName: switched.name || switched.key,
+            modelId: switched.id || '',
+            contextLimit: switched.contextLimit || modelRegistry.getContextLimit()
+          });
+        }
+
         // Show auto-prompt switch
         const autoPrompt = modelRegistry.getPrompt();
         if (promptManager.has(autoPrompt)) {
@@ -1076,6 +1095,7 @@ async function handleCommand(input) {
       console.log(`\n${PAD}${c.cyan}MCP Server Status${c.reset}`);
       try {
         const mcpConnected = await mcpClient.isConnected();
+        if (statusBar) statusBar.update({ mcpConnected });
         const mcpStatus = mcpClient.getStatus();
 
         if (mcpConnected) {
@@ -1410,7 +1430,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     const messages = isGenerating ? generatingMessages : thinkingMessages;
     const currentMessage = messages[messageIndex % messages.length];
     const tokenInfo = isGenerating ? ` ${c.dim}(${tokenCount} tokens)${c.reset}` : '';
-    const statusText = `${PAD}${c.cyan}${spinnerFrames[spinnerIndex]} ${currentMessage}${c.reset}${tokenInfo}`;
+    const statusText = `${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${currentMessage}${c.reset}${tokenInfo}`;
 
     // Save cursor, move to status line, clear and write, restore cursor
     if (isGenerating) {
@@ -1427,7 +1447,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
 
   // Start the status animation
   const startThinking = () => {
-    process.stdout.write(`\n${PAD}${c.cyan}${spinnerFrames[0]} ${thinkingMessages[0]}${c.reset}`);
+    process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[0]} ${thinkingMessages[0]}${c.reset}`);
     statusInterval = setInterval(updateStatus, 100);
   };
 
@@ -1439,7 +1459,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     // Clear the thinking line and show AI label on same line
     process.stdout.clearLine(0);
     process.stdout.cursorTo(0);
-    process.stdout.write(`${PAD}${c.cyan}Ripley →${c.reset} `);
+    process.stdout.write(`${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `);
   };
 
   const stopStatus = () => {
@@ -1491,6 +1511,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
 
   // Start the fun thinking animation
   startThinking();
+  if (statusBar) statusBar.startTiming();
 
   const streamInferenceSettings = modelRegistry.getInferenceSettings();
   const response = await lmStudio.chatStream(messages, {
@@ -1503,7 +1524,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
 
   let fullResponse = '';
   let firstTokenReceived = false;
-  const wordWrapper = new StreamingWordWrapper();
+  const wordWrapper = new StreamingWordWrapper(null, borderRenderer.prefix('ai'));
   const markdownRenderer = new MarkdownRenderer();
 
   const streamHandler = new StreamHandler({
@@ -1514,6 +1535,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
         startGenerating();
       }
       tokenCount++;
+      if (statusBar) statusBar.update({ sessionOut: tokenCount });
       // Render Markdown to ANSI-styled output, then word-wrap
       const rendered = markdownRenderer.render(token);
       const wrapped = wordWrapper.write(rendered);
@@ -1530,9 +1552,11 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
       if (remaining) process.stdout.write(remaining);
       fullResponse = response;
       stopStatus();
+      if (statusBar) statusBar.stopTiming();
     },
     onError: (error) => {
       stopStatus();
+      if (statusBar) statusBar.stopTiming();
       console.log(`\n${PAD}${c.red}Stream error: ${error.message}${c.reset}`);
     }
   });
@@ -1571,7 +1595,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
 
 async function sendAgenticMessage(message, images = [], rawMessage = '') {
   const markdownRenderer = new MarkdownRenderer();
-  const wordWrapper = new StreamingWordWrapper();
+  const wordWrapper = new StreamingWordWrapper(null, borderRenderer.prefix('ai'));
 
   const toolMessages = {
     read_file: '📖 Reading',
@@ -1593,11 +1617,11 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
     process.stdout.clearLine(0);
     process.stdout.cursorTo(0);
-    process.stdout.write(`${PAD}${c.cyan}${spinnerFrames[spinnerIndex]} ${currentStatus}${c.reset}`);
+    process.stdout.write(`${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${currentStatus}${c.reset}`);
   };
 
   const startSpinner = () => {
-    process.stdout.write(`\n${PAD}${c.cyan}${spinnerFrames[0]} ${currentStatus}${c.reset}`);
+    process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[0]} ${currentStatus}${c.reset}`);
     statusInterval = setInterval(updateSpinner, 100);
   };
 
@@ -1647,6 +1671,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
   }
 
   startSpinner();
+  if (statusBar) statusBar.startTiming();
 
   try {
     const runner = new AgenticRunner(lmStudio, {
@@ -1668,15 +1693,15 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
 
           // Show tool call summary
           if (toolCallsDisplayed.length > 0) {
-            console.log(`${PAD}${c.dim}┌─ ${toolCallsDisplayed.length} action(s)${c.reset}`);
+            console.log(`${borderRenderer.prefix('tool')}${c.dim}┌─ ${toolCallsDisplayed.length} action(s)${c.reset}`);
             for (const tc of toolCallsDisplayed) {
               const icon = toolMessages[tc.tool]?.split(' ')[0] || '🔧';
-              console.log(`${PAD}${c.dim}│ ${icon} ${tc.args.path || tc.args.pattern || tc.args.command || tc.tool}${c.reset}`);
+              console.log(`${borderRenderer.prefix('tool')}${c.dim}│ ${icon} ${tc.args.path || tc.args.pattern || tc.args.command || tc.tool}${c.reset}`);
             }
-            console.log(`${PAD}${c.dim}└─${c.reset}`);
+            console.log(`${borderRenderer.prefix('tool')}${c.dim}└─${c.reset}`);
           }
 
-          process.stdout.write(`${PAD}${c.cyan}Ripley →${c.reset} `);
+          process.stdout.write(`${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `);
         }
 
         // Strip leading think blocks from stream (they arrive token by token)
@@ -1701,12 +1726,12 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       },
       onReasoning: (reasoning) => {
         stopSpinner();
-        console.log(`${PAD}${c.dim}┌─ 🧠 Reasoning${c.reset}`);
+        console.log(`${borderRenderer.prefix('thinking')}${c.dim}┌─ 🧠 Reasoning${c.reset}`);
         const lines = reasoning.trim().split('\n');
         for (const line of lines) {
-          console.log(`${PAD}${c.dim}│ ${line}${c.reset}`);
+          console.log(`${borderRenderer.prefix('thinking')}${c.dim}│ ${line}${c.reset}`);
         }
-        console.log(`${PAD}${c.dim}└─${c.reset}\n`);
+        console.log(`${borderRenderer.prefix('thinking')}${c.dim}└─${c.reset}\n`);
       },
       onWarning: (msg) => {
         console.log(`\n${PAD}${c.yellow}⚠ ${msg}${c.reset}`);
@@ -1731,6 +1756,15 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     }
 
     stopSpinner();
+    if (statusBar) {
+      statusBar.stopTiming();
+      statusBar.update({
+        sessionIn: tokenCounter.sessionTokens?.input || 0,
+        sessionOut: tokenCounter.sessionTokens?.output || 0,
+        contextTokens: lastKnownTokens,
+        contextPct: Math.round((lastKnownTokens / modelRegistry.getContextLimit()) * 100)
+      });
+    }
     console.log('\n');
 
     if (fullResponse) {
@@ -1758,8 +1792,9 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   const modeColors = { code: c.cyan, plan: c.cyan, ask: c.magenta };
   let i = 0;
+  if (statusBar) statusBar.startTiming();
   const spinner = setInterval(() => {
-    process.stdout.write(`\r${PAD}${modeColors[interactionMode]}${frames[i]} ${c.dim}Ripley is thinking...${c.reset}`);
+    process.stdout.write(`\r${borderRenderer.prefix('thinking')}${modeColors[interactionMode]}${frames[i]} ${c.dim}Ripley is thinking...${c.reset}`);
     i = (i + 1) % frames.length;
   }, 80);
 
@@ -1812,8 +1847,9 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
 
     const reply = data.choices?.[0]?.message?.content || '';
 
+    if (statusBar) statusBar.stopTiming();
     const { renderMarkdown } = require('./lib/markdownRenderer');
-    console.log(`\n${PAD}${c.cyan}Ripley →${c.reset} `);
+    console.log(`\n${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `);
     console.log(renderMarkdown(reply));
     console.log();
 
@@ -1829,6 +1865,16 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
 async function processAIResponse(reply, originalMessage) {
   // Track tokens
   tokenCounter.trackUsage(originalMessage, reply);
+
+  // Update status bar with token info
+  if (statusBar) {
+    statusBar.update({
+      sessionIn: tokenCounter.sessionTokens?.input || 0,
+      sessionOut: tokenCounter.sessionTokens?.output || 0,
+      contextTokens: lastKnownTokens,
+      contextPct: Math.round((lastKnownTokens / modelRegistry.getContextLimit()) * 100)
+    });
+  }
 
   // In plan mode, save the plan to file and don't parse for operations
   if (interactionMode === 'plan') {
@@ -2341,6 +2387,17 @@ Examples:
     process.exit(1);
   }
 
+  // Install persistent status bar
+  statusBar = new StatusBar();
+  const mcpIsConnected = await mcpClient.isConnected();
+  statusBar.update({
+    modelName: modelRegistry.getCurrent() || '?',
+    modelId: modelRegistry.getCurrentId() || '',
+    contextLimit: modelRegistry.getContextLimit(),
+    mcpConnected: mcpIsConnected
+  });
+  statusBar.install();
+
   console.log(`\n${PAD}${c.dim}Type ${c.yellow}/help${c.reset}${c.dim} for commands • ${c.yellow}@file${c.reset}${c.dim} to add files • ${c.yellow}/exit${c.reset}${c.dim} to quit${c.reset}\n`);
 
   // Create readline with history support
@@ -2386,7 +2443,7 @@ Examples:
     const modelName = modelRegistry.getCurrent() || '?';
     const ctxPct = getContextPercent();
     const thinkIndicator = (thinkingMode && modelRegistry.currentSupportsThinking()) ? ` ${c.cyan}🧠${c.reset}` : '';
-    return `${PAD}${modeIndicators[interactionMode]} ${c.dim}[${modelName}]${c.reset}${thinkIndicator} ${c.dim}ctx:${c.reset}${ctxPct} ${c.orange}You → ${c.reset}`;
+    return `${borderRenderer.prefix('user')}${modeIndicators[interactionMode]} ${c.dim}[${modelName}]${c.reset}${thinkIndicator} ${c.dim}ctx:${c.reset}${ctxPct} ${c.orange}You → ${c.reset}`;
   };
 
   // Paste detection: buffer rapid lines and combine them into one message.
@@ -2479,6 +2536,7 @@ Examples:
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {
+  if (statusBar) statusBar.uninstall();
   if (config && config.get('autoSaveHistory') && conversationHistory.length > 0) {
     config.saveConversation('autosave', conversationHistory);
   }
@@ -2488,6 +2546,7 @@ process.on('SIGINT', () => {
 });
 
 main().catch(error => {
+  if (statusBar) statusBar.uninstall();
   console.error(`${c.red}Fatal error: ${error.message}${c.reset}`);
   if (watcher) watcher.stop();
   process.exit(1);
