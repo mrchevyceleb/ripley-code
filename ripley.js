@@ -504,6 +504,22 @@ async function handleCommand(input) {
       showHelp();
       return true;
 
+    case '/update': {
+      console.log(`\n${c.cyan}  Checking for updates...${c.reset}`);
+      const { execSync } = require('child_process');
+      try {
+        const result = execSync('npm install -g mrchevyceleb/ripley-code', {
+          encoding: 'utf-8',
+          timeout: 60000,
+          stdio: ['pipe', 'pipe', 'pipe']
+        });
+        console.log(`${c.green}  ✓ Updated! Restart Ripley to use the new version.${c.reset}\n`);
+      } catch (err) {
+        console.log(`${c.red}  ✗ Update failed: ${err.message}${c.reset}\n`);
+      }
+      return true;
+    }
+
     case '/version':
     case '/v':
       console.log(`\n${c.cyan}  Ripley Code v${VERSION}${c.reset}\n`);

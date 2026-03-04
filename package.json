@@ -10,6 +10,10 @@
     "start": "node ripley.js",
     "dev": "node ripley.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mrchevyceleb/ripley-code.git"
+  },
   "keywords": ["ai", "cli", "coding", "agent", "assistant"],
   "author": "Matt",
   "license": "MIT",
