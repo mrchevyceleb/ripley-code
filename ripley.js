@@ -984,8 +984,9 @@ async function handleCommand(input) {
                 console.log(`${c.yellow}  ⚠ Could not unload ${inst.key}: ${err.message}${c.reset}`);
               }
             }
-            console.log(`${c.dim}  Loading ${switched.name} in LM Studio...${c.reset}`);
-            const result = await lmStudio.loadModel(switched.id);
+            const ctxLen = switched.contextLimit || 32768;
+            console.log(`${c.dim}  Loading ${switched.name} in LM Studio (ctx: ${(ctxLen / 1024).toFixed(0)}K)...${c.reset}`);
+            const result = await lmStudio.loadModel(switched.id, { contextLength: ctxLen });
             console.log(`${c.green}  ✓ Loaded in ${result.load_time_seconds?.toFixed(1)}s${c.reset}`);
           } catch (err) {
             console.log(`${c.yellow}  ⚠ Could not auto-load: ${err.message}${c.reset}`);

@@ -26,7 +26,7 @@
       "name": "Qwen3 Coder 30B",
       "id": "qwen/qwen3-coder-30b",
       "vram": "~18 GB",
-      "contextLimit": 131072,
+      "contextLimit": 32768,
       "supportsThinking": false,
       "prompt": "code-agent-qwen",
       "inferenceSettings": {
@@ -45,7 +45,7 @@
       "name": "Qwen3.5 35B A3B",
       "id": "qwen/qwen3.5-35b-a3b",
       "vram": "21 GB",
-      "contextLimit": 262144,
+      "contextLimit": 32768,
       "supportsThinking": true,
       "prompt": "code-agent-qwen",
       "inferenceSettings": {
@@ -64,7 +64,7 @@
       "name": "GLM 4.7 Flash",
       "id": "zai-org/glm-4.7-flash",
       "vram": "~18 GB",
-      "contextLimit": 200000,
+      "contextLimit": 32768,
       "supportsThinking": true,
       "prompt": "code-agent-glm",
       "inferenceSettings": {
@@ -106,7 +106,7 @@
       "name": "Gemma 3 27B",
       "id": "google/gemma-3-27b",
       "vram": "~17 GB",
-      "contextLimit": 131072,
+      "contextLimit": 32768,
       "supportsThinking": false,
       "prompt": "code-agent",
       "inferenceSettings": {
@@ -125,7 +125,7 @@
       "name": "Nemotron 3 Nano 30B",
       "id": "nvidia/nemotron-3-nano",
       "vram": "19.3 GB",
-      "contextLimit": 131072,
+      "contextLimit": 32768,
       "supportsThinking": true,
       "prompt": "code-agent-nemotron",
       "inferenceSettings": {
