@@ -102,6 +102,25 @@
       "tier": "fast",
       "description": "Lightweight Qwen3.5 with vision, tool use, and reasoning. Only 6.5 GB."
     },
+    "gemma": {
+      "name": "Gemma 3 27B",
+      "id": "google/gemma-3-27b",
+      "vram": "~17 GB",
+      "contextLimit": 131072,
+      "supportsThinking": false,
+      "prompt": "code-agent",
+      "inferenceSettings": {
+        "temperature": 0.7,
+        "topP": 0.9
+      },
+      "tags": [
+        "coding",
+        "reasoning",
+        "multimodal"
+      ],
+      "tier": "general",
+      "description": "Google's best open model. 27B dense, 128K context, multimodal."
+    },
     "nemotron": {
       "name": "Nemotron 3 Nano 30B",
       "id": "nvidia/nemotron-3-nano",
