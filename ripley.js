@@ -2219,6 +2219,7 @@ Ripley Code v${VERSION} - AI Coding Agent
 Usage:
   ripley              Start interactive mode
   ripley yolo         Start in YOLO mode (auto-apply all changes)
+  ripley update       Update to latest version from GitHub
   ripley init         Initialize .ripley config
   ripley <request>    One-shot mode
 
@@ -2238,6 +2239,22 @@ Examples:
 
   if (args.includes('--version') || args.includes('-v')) {
     console.log(`Ripley Code v${VERSION}`);
+    process.exit(0);
+  }
+
+  if (args[0] === 'update') {
+    console.log('Checking for updates...');
+    const { execSync } = require('child_process');
+    try {
+      execSync('npm install -g mrchevyceleb/ripley-code', {
+        encoding: 'utf-8',
+        timeout: 60000,
+        stdio: 'inherit'
+      });
+      console.log('\n✓ Updated! Run "ripley" to start the new version.');
+    } catch {
+      console.error('\n✗ Update failed. Try: npm install -g mrchevyceleb/ripley-code');
+    }
     process.exit(0);
   }
 
