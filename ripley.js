@@ -38,7 +38,9 @@ const { MarkdownRenderer } = require('./lib/markdownRenderer');
 const LmStudio = require('./lib/lmStudio');
 const PromptManager = require('./lib/promptManager');
 const ModelRegistry = require('./lib/modelRegistry');
-const { AgenticRunner } = require('./lib/agenticRunner');
+const { AgenticRunner, setMcpClient } = require('./lib/agenticRunner');
+const McpClient = require('./lib/mcpClient');
+const { pick } = require('./lib/interactivePicker');
 
 // =============================================================================
 // CONFIGURATION
@@ -64,7 +66,9 @@ let visionAnalyzer = null;
 let lmStudio = null;
 let promptManager = null;
 let modelRegistry = null;
+let mcpClient = null;
 let conversationHistory = [];
+let lastKnownTokens = 0; // Track actual token usage from API responses
 let rl = null;
 
 // Interaction modes: 'code' (default), 'plan' (preview only), 'ask' (no operations)
@@ -76,8 +80,9 @@ let activePrompt = 'base';
 // Thinking mode: when enabled, models that support it will reason before answering
 let thinkingMode = false;
 
-// Abort controller for cancelling requests with Escape
+// Abort controller for cancelling requests with Escape (double-press)
 let currentAbortController = null;
+let lastEscapeTime = 0;
 
 // =============================================================================
 // ASCII ART & UI
@@ -141,6 +146,7 @@ ${c.orange}${c.dim}Config Commands:${c.reset}
 ${c.yellow}  /config${c.reset}             Show current config
 ${c.yellow}  /set <key> <value>${c.reset}  Update config setting
 ${c.yellow}  /instructions${c.reset}       Edit project instructions
+${c.yellow}  /mcp${c.reset}                Show MCP server status & tools
 ${c.yellow}  /watch${c.reset}              Toggle file watch mode
 ${c.yellow}  /stream${c.reset}             Toggle streaming mode
 
@@ -148,6 +154,7 @@ ${c.orange}${c.dim}System Commands:${c.reset}
 ${c.yellow}  /run <cmd>${c.reset}          Run a shell command
 ${c.yellow}  /undo${c.reset}               Show recent backups
 ${c.yellow}  /restore <path>${c.reset}     Restore file from backup
+${c.yellow}  /commands${c.reset}           List custom commands (~/.ripley/Commands/)
 ${c.yellow}  /version${c.reset}            Show version
 ${c.yellow}  /help${c.reset}               Show this help
 ${c.yellow}  /exit${c.reset}               Exit Ripley
@@ -158,7 +165,7 @@ ${c.gray}  • Press ${c.cyan}↑${c.gray}/${c.cyan}↓${c.gray} to navigate com
 ${c.gray}  • Press ${c.cyan}Tab${c.gray} for completion
 ${c.gray}  • Press ${c.cyan}Shift+Tab${c.gray} to cycle modes (code → plan → ask)
 ${c.gray}  • Press ${c.cyan}Alt+V${c.gray} to paste screenshot from clipboard
-${c.gray}  • Press ${c.cyan}Escape${c.gray} to cancel current request
+${c.gray}  • Press ${c.cyan}Esc Esc${c.gray} to cancel current request
 ${c.gray}  • Create ${c.cyan}RIPLEY.md${c.gray} in your project root for project-specific AI instructions
 ${c.reset}
 `);
@@ -260,6 +267,11 @@ function initProject() {
     console.log(`${c.dim}  ○ Vision disabled (no vision model or GEMINI_API_KEY)${c.reset}`);
   }
 
+  // Initialize MCP client
+  const mcpUrl = config.get('mcpUrl') || process.env.MCP_SERVER_URL || null;
+  mcpClient = new McpClient(mcpUrl ? { url: mcpUrl } : {});
+  setMcpClient(mcpClient);
+
   console.log(`${c.cyan}  ✓${c.reset} Mode: always agentic ${c.dim}(reads files on demand, streams final response)${c.reset}`);
 }
 
@@ -273,12 +285,24 @@ async function checkConnection() {
     if (discovery.matched > 0) {
       console.log(`${c.green}  ✓${c.reset} Models: ${discovery.matched} matched from ${discovery.total} loaded`);
     }
-
-    return true;
+  } else {
+    console.log(`${c.red}  ✗${c.reset} Cannot connect to LM Studio at ${lmStudio.baseUrl}`);
+    console.log(`${c.dim}    Make sure LM Studio is running${c.reset}\n`);
+    return false;
   }
-  console.log(`${c.red}  ✗${c.reset} Cannot connect to LM Studio at ${lmStudio.baseUrl}`);
-  console.log(`${c.dim}    Make sure LM Studio is running${c.reset}\n`);
-  return false;
+
+  // Check MCP server connection
+  const mcpConnected = await mcpClient.isConnected();
+  if (mcpConnected) {
+    const status = mcpClient.getStatus();
+    const serverLabel = status.serverName ? `${status.serverName}` : 'assistant-mcp';
+    console.log(`${c.green}  ✓${c.reset} MCP: ${serverLabel} ${c.dim}(${status.url})${c.reset}`);
+  } else {
+    console.log(`${c.yellow}  ○${c.reset} MCP: Not connected ${c.dim}(${mcpClient.url})${c.reset}`);
+    console.log(`${c.dim}    Tools like get_tasks, get_calendar will fail. Set mcpUrl with /set${c.reset}`);
+  }
+
+  return true;
 }
 
 // =============================================================================
@@ -411,6 +435,58 @@ async function searchInFiles(searchText) {
   }
 
   return results;
+}
+
+// =============================================================================
+// CUSTOM COMMANDS (~/.ripley/Commands/)
+// =============================================================================
+
+const COMMANDS_DIR = path.join(require('os').homedir(), '.ripley', 'Commands');
+
+/**
+ * Load a custom command from ~/.ripley/Commands/<name>.md
+ * Returns { name, content, source } or null if not found.
+ */
+function loadCustomCommand(cmd) {
+  // Strip leading slash: /push -> push
+  const name = cmd.replace(/^\//, '');
+  const filePath = path.join(COMMANDS_DIR, `${name}.md`);
+
+  if (!fs.existsSync(filePath)) return null;
+
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8').trim();
+    return { name, content, source: filePath };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * List all available custom commands from ~/.ripley/Commands/
+ */
+function listCustomCommands() {
+  if (!fs.existsSync(COMMANDS_DIR)) {
+    console.log(`\n${c.dim}  No custom commands directory found at ${COMMANDS_DIR}${c.reset}\n`);
+    return;
+  }
+
+  const files = fs.readdirSync(COMMANDS_DIR).filter(f => f.endsWith('.md')).sort();
+  if (files.length === 0) {
+    console.log(`\n${c.dim}  No custom commands found in ${COMMANDS_DIR}${c.reset}\n`);
+    return;
+  }
+
+  console.log(`\n${c.cyan}  Custom Commands${c.reset} ${c.dim}(${COMMANDS_DIR})${c.reset}\n`);
+  for (const file of files) {
+    const name = file.replace('.md', '');
+    // Read first non-empty, non-heading line as description
+    const content = fs.readFileSync(path.join(COMMANDS_DIR, file), 'utf-8');
+    const lines = content.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+    const desc = lines[0] || '';
+    console.log(`  ${c.green}/${name}${c.reset}  ${c.dim}${desc.slice(0, 60)}${c.reset}`);
+  }
+  console.log();
 }
 
 // =============================================================================
@@ -621,6 +697,7 @@ async function handleCommand(input) {
 
     case '/clear':
       conversationHistory = [];
+      lastKnownTokens = 0;
       contextBuilder.clearFiles();
       contextBuilder.loadPriorityFiles();
       tokenCounter.resetSession();
@@ -630,6 +707,7 @@ async function handleCommand(input) {
 
     case '/clearhistory':
       conversationHistory = [];
+      lastKnownTokens = 0;
       tokenCounter.resetSession();
       console.log(`\n${c.green}  ✓ Cleared conversation history${c.reset}\n`);
       return true;
@@ -819,15 +897,24 @@ async function handleCommand(input) {
       const requestedPrompt = args.trim().toLowerCase();
 
       if (!requestedPrompt) {
-        // Show current prompt and available options
+        // Interactive prompt picker
         const available = promptManager.list();
-        console.log(`\n${c.cyan}  Active Prompt:${c.reset} ${c.yellow}${activePrompt}${c.reset}`);
-        console.log(`${c.dim}  Available prompts (drop .md files in prompts/ to add more):${c.reset}`);
-        for (const name of available) {
-          const marker = name === activePrompt ? `${c.green} ●${c.reset}` : `${c.dim} ○${c.reset}`;
-          console.log(`  ${marker} ${name}`);
+        const promptItems = available.map(name => ({
+          key: name,
+          label: name,
+          description: '',
+          tags: [],
+          active: name === activePrompt
+        }));
+
+        const selectedPrompt = await pick(promptItems, { title: 'Switch Prompt' });
+        if (selectedPrompt) {
+          activePrompt = selectedPrompt.key;
+          config.set('activePrompt', selectedPrompt.key);
+          console.log(`${c.green}  ✓ Prompt: ${selectedPrompt.key}${c.reset}\n`);
+        } else {
+          console.log(`${c.dim}  Cancelled${c.reset}\n`);
         }
-        console.log();
         return true;
       }
 
@@ -845,29 +932,44 @@ async function handleCommand(input) {
     case '/models':
       const modelArg = args.trim().toLowerCase();
 
-      if (!modelArg) {
-        // Show current model and list all
-        const models = modelRegistry.list();
-        const current = modelRegistry.getCurrent();
-        console.log(`\n${c.cyan}  Models:${c.reset}`);
-        for (const m of models) {
-          const marker = m.key === current ? `${c.green} ●${c.reset}` : `${c.dim} ○${c.reset}`;
-          const tags = m.tags ? ` ${c.dim}[${m.tags.join(', ')}]${c.reset}` : '';
-          const id = m.id ? '' : ` ${c.red}(not loaded)${c.reset}`;
-          console.log(`  ${marker} ${c.yellow}${m.key}${c.reset} - ${m.name}${tags}${id}`);
-          if (m.description) {
-            console.log(`      ${c.dim}${m.description}${c.reset}`);
+      // Helper: switch model in registry + LM Studio
+      async function switchModel(modelKey) {
+        const oldModel = modelRegistry.getCurrentModel();
+        modelRegistry.setCurrent(modelKey);
+        config.set('activeModel', modelKey);
+        lastKnownTokens = 0; // Reset context counter for new model
+        const switched = modelRegistry.getCurrentModel();
+
+        console.log(`${c.green}  ✓ Model: ${switched.name}${c.reset} ${c.dim}(${switched.key})${c.reset}`);
+
+        // Show auto-prompt switch
+        const autoPrompt = modelRegistry.getPrompt();
+        if (promptManager.has(autoPrompt)) {
+          console.log(`${c.dim}  Prompt: ${autoPrompt}${c.reset}`);
+        }
+
+        // Load model in LM Studio (unload old one first)
+        if (switched.id && (!oldModel || switched.id !== oldModel.id)) {
+          try {
+            // Unload old model by finding its real instance ID
+            const loaded = await lmStudio.getLoadedInstances();
+            for (const inst of loaded) {
+              try {
+                await lmStudio.unloadModel(inst.instanceId);
+                console.log(`${c.dim}  Unloaded ${inst.displayName || inst.key}${c.reset}`);
+              } catch (err) {
+                console.log(`${c.yellow}  ⚠ Could not unload ${inst.key}: ${err.message}${c.reset}`);
+              }
+            }
+            console.log(`${c.dim}  Loading ${switched.name} in LM Studio...${c.reset}`);
+            const result = await lmStudio.loadModel(switched.id);
+            console.log(`${c.green}  ✓ Loaded in ${result.load_time_seconds?.toFixed(1)}s${c.reset}`);
+          } catch (err) {
+            console.log(`${c.yellow}  ⚠ Could not auto-load: ${err.message}${c.reset}`);
+            console.log(`${c.dim}  Load it manually in LM Studio${c.reset}`);
           }
         }
-        console.log(`\n${c.dim}  Usage: /model <name> to switch${c.reset}\n`);
-        return true;
-      }
 
-      try {
-        modelRegistry.setCurrent(modelArg);
-        config.set('activeModel', modelArg);
-        const switched = modelRegistry.getCurrentModel();
-        console.log(`\n${c.green}  ✓ Model: ${switched.name}${c.reset} ${c.dim}(${switched.key})${c.reset}`);
         if (switched.tags?.includes('max-quality')) {
           console.log(`${c.yellow}  ⚠ This model may be slow (spills to CPU)${c.reset}`);
         }
@@ -875,9 +977,70 @@ async function handleCommand(input) {
           console.log(`${c.green}  ✓ Vision enabled (local)${c.reset}`);
         }
         console.log();
+      }
+
+      if (!modelArg) {
+        // Interactive model picker
+        const models = modelRegistry.list();
+        const current = modelRegistry.getCurrent();
+        const pickerItems = models.map(m => ({
+          key: m.key,
+          label: m.name,
+          description: m.description || '',
+          tags: m.tags || [],
+          active: m.key === current
+        }));
+
+        const selected = await pick(pickerItems, { title: 'Switch Model' });
+        if (selected) {
+          await switchModel(selected.key);
+        } else {
+          console.log(`${c.dim}  Cancelled${c.reset}\n`);
+        }
+        return true;
+      }
+
+      try {
+        await switchModel(modelArg);
       } catch (err) {
         console.log(`\n${c.red}  ✗ ${err.message}${c.reset}\n`);
       }
+      return true;
+
+    case '/mcp':
+      console.log(`\n${c.cyan}  MCP Server Status${c.reset}`);
+      try {
+        const mcpConnected = await mcpClient.isConnected();
+        const mcpStatus = mcpClient.getStatus();
+
+        if (mcpConnected) {
+          const serverLabel = mcpStatus.serverName || 'assistant-mcp';
+          const serverVer = mcpStatus.serverVersion ? ` v${mcpStatus.serverVersion}` : '';
+          console.log(`${c.green}  ✓ Connected${c.reset} to ${serverLabel}${serverVer}`);
+          console.log(`${c.dim}    URL: ${mcpStatus.url}${c.reset}`);
+          if (mcpStatus.sessionId) {
+            console.log(`${c.dim}    Session: ${mcpStatus.sessionId}${c.reset}`);
+          }
+
+          // List available tools
+          try {
+            const tools = await mcpClient.listTools();
+            console.log(`\n${c.cyan}  Available Tools (${tools.length}):${c.reset}`);
+            for (const tool of tools) {
+              console.log(`${c.yellow}    ${tool.name}${c.reset}${tool.description ? ` ${c.dim}- ${tool.description.slice(0, 60)}${c.reset}` : ''}`);
+            }
+          } catch (toolErr) {
+            console.log(`\n${c.yellow}  Could not list tools: ${toolErr.message}${c.reset}`);
+          }
+        } else {
+          console.log(`${c.red}  ✗ Not connected${c.reset}`);
+          console.log(`${c.dim}    URL: ${mcpStatus.url}${c.reset}`);
+          console.log(`${c.dim}    Set URL: /set mcpUrl <url>${c.reset}`);
+        }
+      } catch (mcpErr) {
+        console.log(`${c.red}  ✗ Error: ${mcpErr.message}${c.reset}`);
+      }
+      console.log();
       return true;
 
     case '/config':
@@ -983,7 +1146,19 @@ async function handleCommand(input) {
       console.log(`\n${c.cyan}  👋 See you later!${c.reset}\n`);
       process.exit(0);
 
+    case '/commands':
+      listCustomCommands();
+      return true;
+
     default:
+      // Check for custom commands in ~/.ripley/Commands/
+      const customResult = loadCustomCommand(cmd);
+      if (customResult) {
+        console.log(`\n${c.cyan}  Running custom command: ${customResult.name}${c.reset}`);
+        console.log(`${c.dim}  Source: ${customResult.source}${c.reset}\n`);
+        await sendMessage(customResult.content);
+        return true;
+      }
       return false;
   }
 }
@@ -1099,9 +1274,8 @@ async function sendMessage(message) {
 
   let fullMessage = `## Project Overview\n\nWorking directory: ${projectDir}\n\nFiles available (use read_file to examine if needed):\n${fileList.slice(0, 20).join('\n')}${fileList.length > 20 ? `\n... and ${fileList.length - 20} more (use list_files to explore)` : ''}`;
 
-  if (instructions) {
-    fullMessage += `\n\n## Project Instructions\n\n${instructions.content}`;
-  }
+  // NOTE: Project instructions (RIPLEY.md) are now injected in the system prompt,
+  // not here in the user message. This gives them higher priority with local models.
 
   if (imageAnalysis) {
     fullMessage += `\n\n## Image Analysis\n\n${imageAnalysis}`;
@@ -1222,8 +1396,13 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
   // Build messages array for LM Studio
   const messages = [];
   const systemPrompt = promptManager.get(promptMode);
-  if (systemPrompt) {
-    messages.push({ role: 'system', content: systemPrompt });
+  const streamInstructions = config.getInstructions();
+  let fullSystemPrompt = systemPrompt || '';
+  if (streamInstructions) {
+    fullSystemPrompt += `\n\n## Project Instructions (from ${streamInstructions.source})\n\n${streamInstructions.content}`;
+  }
+  if (fullSystemPrompt) {
+    messages.push({ role: 'system', content: fullSystemPrompt });
   }
   messages.push(...conversationHistory);
 
@@ -1240,8 +1419,12 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
   // Start the fun thinking animation
   startThinking();
 
+  const streamInferenceSettings = modelRegistry.getInferenceSettings();
   const response = await lmStudio.chatStream(messages, {
     model: modelRegistry.getCurrentId(),
+    temperature: streamInferenceSettings.temperature,
+    topP: streamInferenceSettings.topP,
+    repeatPenalty: streamInferenceSettings.repeatPenalty,
     signal: currentAbortController.signal
   });
 
@@ -1354,21 +1537,33 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     process.stdout.cursorTo(0);
   };
 
-  // Determine prompt
+  // Determine prompt - use model-specific prompt if available
   let promptMode;
   if (interactionMode === 'plan' && promptManager.has('plan')) {
     promptMode = 'plan';
-  } else if (promptManager.has('code-agent')) {
-    promptMode = 'code-agent';
   } else {
-    promptMode = activePrompt;
+    // Model-specific prompt (e.g., code-agent-gptoss) > generic code-agent > active prompt
+    const modelPrompt = modelRegistry.getPrompt();
+    if (promptManager.has(modelPrompt)) {
+      promptMode = modelPrompt;
+    } else if (promptManager.has('code-agent')) {
+      promptMode = 'code-agent';
+    } else {
+      promptMode = activePrompt;
+    }
   }
 
   // Build messages array
   const messages = [];
   const systemPrompt = promptManager.get(promptMode);
-  if (systemPrompt) {
-    messages.push({ role: 'system', content: systemPrompt });
+  const instructions = config.getInstructions();
+  // Combine base prompt + project instructions into one system message
+  let fullSystemPrompt = systemPrompt || '';
+  if (instructions) {
+    fullSystemPrompt += `\n\n## Project Instructions (from ${instructions.source})\n\n${instructions.content}`;
+  }
+  if (fullSystemPrompt) {
+    messages.push({ role: 'system', content: fullSystemPrompt });
   }
   messages.push(...conversationHistory);
 
@@ -1445,10 +1640,22 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       }
     });
 
+    // Use model-specific inference settings
+    currentAbortController = new AbortController();
+    const inferenceSettings = modelRegistry.getInferenceSettings();
     const fullResponse = await runner.run(messages, projectDir, {
       model: modelRegistry.getCurrentId(),
-      thinking: thinkingMode && modelRegistry.currentSupportsThinking()
+      temperature: inferenceSettings.temperature,
+      topP: inferenceSettings.topP,
+      repeatPenalty: inferenceSettings.repeatPenalty,
+      thinking: thinkingMode && modelRegistry.currentSupportsThinking(),
+      signal: currentAbortController.signal
     });
+
+    // Update context usage from actual API token count
+    if (runner.totalTokens > 0) {
+      lastKnownTokens = runner.totalTokens;
+    }
 
     stopSpinner();
     console.log('\n');
@@ -1464,11 +1671,14 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
 
   } catch (error) {
     stopSpinner();
+    currentAbortController = null;
     if (error.name === 'AbortError') {
+      console.log(`\n\n${c.yellow}  ⚠ Request cancelled${c.reset}\n`);
       return;
     }
     throw error;
   }
+  currentAbortController = null;
 }
 
 async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
@@ -1492,8 +1702,13 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
     // Build messages array
     const messages = [];
     const systemPrompt = promptManager.get(promptMode);
-    if (systemPrompt) {
-      messages.push({ role: 'system', content: systemPrompt });
+    const compactInstructions = config.getInstructions();
+    let fullSystemPrompt = systemPrompt || '';
+    if (compactInstructions) {
+      fullSystemPrompt += `\n\n## Project Instructions (from ${compactInstructions.source})\n\n${compactInstructions.content}`;
+    }
+    if (fullSystemPrompt) {
+      messages.push({ role: 'system', content: fullSystemPrompt });
     }
     messages.push(...conversationHistory);
 
@@ -1504,8 +1719,12 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
       messages.push({ role: 'user', content: message });
     }
 
+    const compactInferenceSettings = modelRegistry.getInferenceSettings();
     const data = await lmStudio.chat(messages, {
-      model: modelRegistry.getCurrentId()
+      model: modelRegistry.getCurrentId(),
+      temperature: compactInferenceSettings.temperature,
+      topP: compactInferenceSettings.topP,
+      repeatPenalty: compactInferenceSettings.repeatPenalty
     });
 
     clearInterval(spinner);
@@ -1586,9 +1805,10 @@ async function processAIResponse(reply, originalMessage) {
   conversationHistory.push({ role: 'assistant', content: reply });
 
   // Auto-compact if context usage hits 80%+
-  const historyText = conversationHistory.map(m => m.content || '').join(' ');
-  const usedTokens = tokenCounter.estimateTokens(historyText);
   const ctxLimit = modelRegistry.getContextLimit();
+  const usedTokens = lastKnownTokens > 0
+    ? lastKnownTokens
+    : tokenCounter.estimateTokens(conversationHistory.map(m => m.content || '').join(' '));
   if (usedTokens / ctxLimit >= 0.80) {
     await compactHistory();
   } else {
@@ -1875,20 +2095,27 @@ function createReadlineInterface() {
     terminal: true
   });
 
-  // Handle up/down for history, Shift+Tab for mode cycling, Alt+V for clipboard paste
+  // Handle keypress events: history, mode cycling, clipboard, escape
+  // NOTE: Tab completion is handled by readline's built-in completer (not here)
   process.stdin.on('keypress', async (char, key) => {
     if (!key) return;
 
+    // --- History navigation ---
     if (key.name === 'up') {
       const prev = historyManager.up(rl.line);
       rl.write(null, { ctrl: true, name: 'u' }); // Clear line
       rl.write(prev);
-    } else if (key.name === 'down') {
+      return;
+    }
+    if (key.name === 'down') {
       const next = historyManager.down(rl.line);
       rl.write(null, { ctrl: true, name: 'u' }); // Clear line
       rl.write(next);
-    } else if (key.name === 'tab' && key.shift) {
-      // Shift+Tab: Cycle through modes (code -> plan -> ask -> code)
+      return;
+    }
+
+    // --- Shift+Tab: Cycle through modes ---
+    if (key.name === 'tab' && key.shift) {
       const modes = ['code', 'plan', 'ask'];
       const currentIndex = modes.indexOf(interactionMode);
       const nextIndex = (currentIndex + 1) % modes.length;
@@ -1902,12 +2129,14 @@ function createReadlineInterface() {
         ask: 'Question-only mode (no operations)'
       };
 
-      // Move to new line and show mode change
       process.stdout.write('\n');
       console.log(`${modeColors[interactionMode]}  ${modeIcons[interactionMode]} Mode: ${interactionMode.toUpperCase()}${c.reset} ${c.dim}- ${modeDescriptions[interactionMode]}${c.reset}`);
       rl.prompt(true);
-    } else if (key.name === 'v' && key.meta) {
-      // Alt+V: Paste screenshot from clipboard
+      return;
+    }
+
+    // --- Alt+V: Paste screenshot from clipboard ---
+    if (key.name === 'v' && key.meta) {
       process.stdout.write('\n');
       console.log(`${c.cyan}  📋 Pasting from clipboard...${c.reset}`);
 
@@ -1916,13 +2145,11 @@ function createReadlineInterface() {
         const sizeKB = Math.round(result.data.size / 1024);
         console.log(`${c.green}  ✓ Screenshot added (${sizeKB}KB)${c.reset}`);
 
-        // Auto-analyze with Gemini if available
         if (visionAnalyzer.isEnabled()) {
           console.log(`${c.cyan}  🔍 Analyzing with Gemini...${c.reset}`);
           const analysis = await visionAnalyzer.analyzeImage(result.data, '');
           if (analysis) {
             console.log(`${c.green}  ✓ Image analyzed - ready for your question${c.reset}`);
-            // Store analysis for next message
             result.data.analysis = analysis;
           }
         }
@@ -1932,14 +2159,24 @@ function createReadlineInterface() {
       }
       console.log();
       rl.prompt(true);
-    } else if (key.name === 'escape') {
-      // Escape: Cancel current request
+      return;
+    }
+
+    // --- Escape x2: Cancel current request ---
+    if (key.name === 'escape') {
       if (currentAbortController) {
-        currentAbortController.abort();
-        currentAbortController = null;
-        console.log(`\n\n${c.yellow}  ⚠ Request cancelled${c.reset}\n`);
-        rl.prompt(true);
+        const now = Date.now();
+        if (now - lastEscapeTime < 500) {
+          // Double Escape within 500ms - cancel
+          currentAbortController.abort();
+          lastEscapeTime = 0;
+        } else {
+          // First Escape - show hint
+          lastEscapeTime = now;
+          process.stdout.write(`\n${c.dim}  Press Esc again to cancel${c.reset}`);
+        }
       }
+      return;
     }
   });
 
@@ -2040,10 +2277,16 @@ Examples:
 
   // Interactive mode
   const getContextPercent = () => {
-    // Estimate tokens in current conversation history
-    const historyText = conversationHistory.map(m => m.content || '').join(' ');
-    const usedTokens = tokenCounter.estimateTokens(historyText);
+    // Use actual token count from last API response when available
     const limit = modelRegistry.getContextLimit();
+    let usedTokens;
+    if (lastKnownTokens > 0) {
+      usedTokens = lastKnownTokens;
+    } else {
+      // Fallback: estimate from conversation history
+      const historyText = conversationHistory.map(m => m.content || '').join(' ');
+      usedTokens = tokenCounter.estimateTokens(historyText);
+    }
     const pct = Math.min(100, Math.round((usedTokens / limit) * 100));
 
     // Color code: green < 50%, yellow 50-79%, red 80%+
@@ -2089,7 +2332,7 @@ Examples:
       if (trimmed.startsWith('/')) {
         const handled = await handleCommand(trimmed);
         if (!handled) {
-          console.log(`\n${c.dim}  Unknown command. Type /help for available commands.${c.reset}\n`);
+          console.log(`\n${c.dim}  Unknown command. Type /help or /commands for available commands.${c.reset}\n`);
         }
         prompt();
         return;
