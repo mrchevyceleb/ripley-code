@@ -20,6 +20,7 @@
 const readline = require('readline');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 const FileManager = require('./lib/fileManager');
 const ContextBuilder = require('./lib/contextBuilder');
@@ -47,6 +48,7 @@ const { pick } = require('./lib/interactivePicker');
 // =============================================================================
 
 const VERSION = '4.0.0';
+const PAD = '  '; // Global left padding for all output
 
 // =============================================================================
 // GLOBALS
@@ -91,84 +93,83 @@ let lastEscapeTime = 0;
 function showBanner() {
   console.clear();
   console.log(`
-${c.orange}
-    ██████╗ ██╗██████╗ ██╗     ███████╗██╗   ██╗
-    ██╔══██╗██║██╔══██╗██║     ██╔════╝╚██╗ ██╔╝
-    ██████╔╝██║██████╔╝██║     █████╗   ╚████╔╝
-    ██╔══██╗██║██╔═══╝ ██║     ██╔══╝    ╚██╔╝
-    ██║  ██║██║██║     ███████╗███████╗   ██║
-    ╚═╝  ╚═╝╚═╝╚═╝     ╚══════╝╚══════╝   ╚═╝
+${c.orange}${PAD}██████╗ ██╗██████╗ ██╗     ███████╗██╗   ██╗
+${PAD}██╔══██╗██║██╔══██╗██║     ██╔════╝╚██╗ ██╔╝
+${PAD}██████╔╝██║██████╔╝██║     █████╗   ╚████╔╝
+${PAD}██╔══██╗██║██╔═══╝ ██║     ██╔══╝    ╚██╔╝
+${PAD}██║  ██║██║██║     ███████╗███████╗   ██║
+${PAD}╚═╝  ╚═╝╚═╝╚═╝     ╚══════╝╚══════╝   ╚═╝
 ${c.reset}
-${c.cyan}    ═══════════════════════════════════════════${c.reset}
-${c.dim}    Ripley Code • v${VERSION} • Direct to LM Studio${c.reset}
-${c.cyan}    ═══════════════════════════════════════════${c.reset}
+${PAD}${c.cyan}═══════════════════════════════════════════${c.reset}
+${PAD}${c.dim}Ripley Code • v${VERSION} • Direct to LM Studio${c.reset}
+${PAD}${c.cyan}═══════════════════════════════════════════${c.reset}
 `);
 }
 
 function showHelp() {
+  const P = PAD;
   console.log(`
-${c.orange}${c.dim}File Commands:${c.reset}
-${c.yellow}  /files${c.reset}              List files in context
-${c.yellow}  /read <path>${c.reset}        Add file to context (or use @filename)
-${c.yellow}  /unread <path>${c.reset}      Remove file from context
-${c.yellow}  /tree${c.reset}               Show project structure
-${c.yellow}  /find <pattern>${c.reset}     Find files matching pattern
-${c.yellow}  /grep <text>${c.reset}        Search for text in files
-${c.yellow}  /image <path>${c.reset}       Add image (vision model or Gemini fallback)
+${P}${c.orange}${c.dim}File Commands:${c.reset}
+${P}${c.yellow}/files${c.reset}              List files in context
+${P}${c.yellow}/read <path>${c.reset}        Add file to context (or use @filename)
+${P}${c.yellow}/unread <path>${c.reset}      Remove file from context
+${P}${c.yellow}/tree${c.reset}               Show project structure
+${P}${c.yellow}/find <pattern>${c.reset}     Find files matching pattern
+${P}${c.yellow}/grep <text>${c.reset}        Search for text in files
+${P}${c.yellow}/image <path>${c.reset}       Add image (vision model or Gemini fallback)
 
-${c.orange}${c.dim}Git Commands:${c.reset}
-${c.yellow}  /git${c.reset}                Show git status
-${c.yellow}  /diff${c.reset}               Show uncommitted changes
-${c.yellow}  /log${c.reset}                Show recent commits
+${P}${c.orange}${c.dim}Git Commands:${c.reset}
+${P}${c.yellow}/git${c.reset}                Show git status
+${P}${c.yellow}/diff${c.reset}               Show uncommitted changes
+${P}${c.yellow}/log${c.reset}                Show recent commits
 
-${c.orange}${c.dim}Session Commands:${c.reset}
-${c.yellow}  /clear${c.reset}              Clear conversation & context
-${c.yellow}  /clearhistory${c.reset}       Clear conversation only
-${c.yellow}  /save <name>${c.reset}        Save conversation
-${c.yellow}  /load <name>${c.reset}        Load saved conversation
-${c.yellow}  /sessions${c.reset}           List saved sessions
-${c.yellow}  /context${c.reset}            Show context size & tokens
-${c.yellow}  /tokens${c.reset}             Show token usage this session
-${c.yellow}  /compact${c.reset}            Toggle compact mode
-${c.yellow}  /think${c.reset}              Toggle thinking mode (gpt-oss reasons before answering)
+${P}${c.orange}${c.dim}Session Commands:${c.reset}
+${P}${c.yellow}/clear${c.reset}              Clear conversation & context
+${P}${c.yellow}/clearhistory${c.reset}       Clear conversation only
+${P}${c.yellow}/save <name>${c.reset}        Save conversation
+${P}${c.yellow}/load <name>${c.reset}        Load saved conversation
+${P}${c.yellow}/sessions${c.reset}           List saved sessions
+${P}${c.yellow}/context${c.reset}            Show context size & tokens
+${P}${c.yellow}/tokens${c.reset}             Show token usage this session
+${P}${c.yellow}/compact${c.reset}            Toggle compact mode
+${P}${c.yellow}/think${c.reset}              Toggle thinking mode (gpt-oss reasons before answering)
 
-${c.orange}${c.dim}Modes:${c.reset}
-${c.yellow}  /plan${c.reset}               Toggle PLAN mode (creates plan, no code)
-${c.yellow}  /implement${c.reset}          Execute the saved plan
-${c.yellow}  /ask${c.reset}                Toggle ASK mode (questions only, no file ops)
-${c.yellow}  /mode${c.reset}               Show current mode
-${c.yellow}  /yolo${c.reset}               Toggle YOLO mode (auto-apply all changes)
-${c.yellow}  /agent${c.reset}              Show agentic mode info (always on)
-${c.yellow}  /model [name]${c.reset}      Show/switch model (nemotron, coder, max, vision...)
-${c.yellow}  /prompt [name]${c.reset}     Show/switch prompt (base, code-agent, or any .md)
+${P}${c.orange}${c.dim}Modes:${c.reset}
+${P}${c.yellow}/plan${c.reset}               Toggle PLAN mode (creates plan, no code)
+${P}${c.yellow}/implement${c.reset}          Execute the saved plan
+${P}${c.yellow}/ask${c.reset}                Toggle ASK mode (questions only, no file ops)
+${P}${c.yellow}/mode${c.reset}               Show current mode
+${P}${c.yellow}/yolo${c.reset}               Toggle YOLO mode (auto-apply all changes)
+${P}${c.yellow}/agent${c.reset}              Show agentic mode info (always on)
+${P}${c.yellow}/model [name]${c.reset}      Show/switch model (nemotron, coder, max, vision...)
+${P}${c.yellow}/prompt [name]${c.reset}     Show/switch prompt (base, code-agent, or any .md)
 
-${c.orange}${c.dim}Config Commands:${c.reset}
-${c.yellow}  /config${c.reset}             Show current config
-${c.yellow}  /set <key> <value>${c.reset}  Update config setting
-${c.yellow}  /instructions${c.reset}       Edit project instructions
-${c.yellow}  /mcp${c.reset}                Show MCP server status & tools
-${c.yellow}  /watch${c.reset}              Toggle file watch mode
-${c.yellow}  /stream${c.reset}             Toggle streaming mode
+${P}${c.orange}${c.dim}Config Commands:${c.reset}
+${P}${c.yellow}/config${c.reset}             Show current config
+${P}${c.yellow}/set <key> <value>${c.reset}  Update config setting
+${P}${c.yellow}/instructions${c.reset}       Edit project instructions
+${P}${c.yellow}/mcp${c.reset}                Show MCP server status & tools
+${P}${c.yellow}/watch${c.reset}              Toggle file watch mode
+${P}${c.yellow}/stream${c.reset}             Toggle streaming mode
 
-${c.orange}${c.dim}System Commands:${c.reset}
-${c.yellow}  /run <cmd>${c.reset}          Run a shell command
-${c.yellow}  /undo${c.reset}               Show recent backups
-${c.yellow}  /restore <path>${c.reset}     Restore file from backup
-${c.yellow}  /commands${c.reset}           List custom commands (~/.ripley/Commands/)
-${c.yellow}  /version${c.reset}            Show version
-${c.yellow}  /help${c.reset}               Show this help
-${c.yellow}  /exit${c.reset}               Exit Ripley
+${P}${c.orange}${c.dim}System Commands:${c.reset}
+${P}${c.yellow}/run <cmd>${c.reset}          Run a shell command
+${P}${c.yellow}/undo${c.reset}               Show recent backups
+${P}${c.yellow}/restore <path>${c.reset}     Restore file from backup
+${P}${c.yellow}/commands${c.reset}           List custom commands (~/.ripley/Commands/)
+${P}${c.yellow}/version${c.reset}            Show version
+${P}${c.yellow}/help${c.reset}               Show this help
+${P}${c.yellow}/exit${c.reset}               Exit Ripley
 
-${c.orange}${c.dim}Tips:${c.reset}
-${c.gray}  • Use ${c.cyan}@filename${c.gray} in messages to auto-load files
-${c.gray}  • Press ${c.cyan}↑${c.gray}/${c.cyan}↓${c.gray} to navigate command history
-${c.gray}  • Press ${c.cyan}Tab${c.gray} for completion
-${c.gray}  • Press ${c.cyan}Shift+Tab${c.gray} to cycle modes (code → plan → ask)
-${c.gray}  • Press ${c.cyan}Alt+V${c.gray} to paste screenshot from clipboard
-${c.gray}  • Press ${c.cyan}Esc Esc${c.gray} to cancel current request
-${c.gray}  • Create ${c.cyan}RIPLEY.md${c.gray} in your project root for project-specific AI instructions
-${c.reset}
-`);
+${P}${c.orange}${c.dim}Tips:${c.reset}
+${P}${c.gray}• Use ${c.cyan}@filename${c.gray} in messages to auto-load files
+${P}${c.gray}• Press ${c.cyan}↑${c.gray}/${c.cyan}↓${c.gray} to navigate command history
+${P}${c.gray}• Press ${c.cyan}Tab${c.gray} for completion
+${P}${c.gray}• Press ${c.cyan}Shift+Tab${c.gray} to cycle modes (code → plan → ask)
+${P}${c.gray}• Press ${c.cyan}Alt+V${c.gray} to paste screenshot from clipboard
+${P}${c.gray}• Press ${c.cyan}Esc Esc${c.gray} to cancel current request
+${P}${c.gray}• Create ${c.cyan}RIPLEY.md${c.gray} in your project root for project-specific AI instructions
+${c.reset}`);
 }
 
 // =============================================================================
@@ -219,7 +220,7 @@ function initProject() {
   // Try to get Gemini API key from: 1) project config, 2) global config, 3) env var
   let geminiKey = config.get('geminiApiKey');
   if (!geminiKey) {
-    const globalConfigPath = path.join(__dirname, '.ripley', 'config.json');
+    const globalConfigPath = path.join(os.homedir(), '.ripley', 'config.json');
     try {
       if (fs.existsSync(globalConfigPath)) {
         const globalConfig = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
@@ -233,45 +234,45 @@ function initProject() {
   // Initialize watcher (but don't start yet)
   watcher = new Watcher(projectDir, contextBuilder, {
     onChange: (file, type) => {
-      console.log(`\n${c.dim}  📁 ${file} ${type}${c.reset}`);
+      console.log(`\n${PAD}${c.dim}📁 ${file} ${type}${c.reset}`);
     },
     onError: (file, error) => {
-      console.log(`\n${c.red}  ⚠ Watch error: ${file}: ${error.message}${c.reset}`);
+      console.log(`\n${PAD}${c.red}⚠ Watch error: ${file}: ${error.message}${c.reset}`);
     }
   });
 
   // Get project summary
   const summary = contextBuilder.getSummary();
 
-  console.log(`${c.green}  ✓${c.reset} Project: ${c.white}${path.basename(projectDir)}${c.reset}`);
-  console.log(`${c.green}  ✓${c.reset} Files: ${summary.sourceFiles} source files in ${summary.totalDirs} directories`);
+  console.log(`${PAD}${c.green}✓${c.reset} Project: ${c.white}${path.basename(projectDir)}${c.reset}`);
+  console.log(`${PAD}${c.green}✓${c.reset} Files: ${summary.sourceFiles} source files in ${summary.totalDirs} directories`);
 
   // Load priority files
   contextBuilder.loadPriorityFiles();
-  console.log(`${c.green}  ✓${c.reset} Context: ${contextBuilder.getLoadedFiles().length} files loaded`);
+  console.log(`${PAD}${c.green}✓${c.reset} Context: ${contextBuilder.getLoadedFiles().length} files loaded`);
 
   // Check for project instructions (RIPLEY.md or .ripley/instructions.md)
   const instructions = config.getInstructions();
   if (instructions) {
-    console.log(`${c.green}  ✓${c.reset} Project instructions loaded ${c.dim}(${instructions.source})${c.reset}`);
+    console.log(`${PAD}${c.green}✓${c.reset} Project instructions loaded ${c.dim}(${instructions.source})${c.reset}`);
   }
 
   // Show model info
   const currentModel = modelRegistry.getCurrentModel();
   if (currentModel) {
-    console.log(`${c.green}  ✓${c.reset} Model: ${c.white}${currentModel.name}${c.reset} ${c.dim}(${currentModel.key})${c.reset}`);
+    console.log(`${PAD}${c.green}✓${c.reset} Model: ${c.white}${currentModel.name}${c.reset} ${c.dim}(${currentModel.key})${c.reset}`);
   }
 
   // Show prompt info
-  console.log(`${c.green}  ✓${c.reset} Prompt: ${c.white}${activePrompt}${c.reset} ${c.dim}(${promptManager.list().length} available)${c.reset}`);
+  console.log(`${PAD}${c.green}✓${c.reset} Prompt: ${c.white}${activePrompt}${c.reset} ${c.dim}(${promptManager.list().length} available)${c.reset}`);
 
   // Vision capability
   if (modelRegistry.currentSupportsVision()) {
-    console.log(`${c.green}  ✓${c.reset} Vision: local model (direct)`);
+    console.log(`${PAD}${c.green}✓${c.reset} Vision: local model (direct)`);
   } else if (visionAnalyzer.isEnabled()) {
-    console.log(`${c.green}  ✓${c.reset} Vision: Gemini fallback`);
+    console.log(`${PAD}${c.green}✓${c.reset} Vision: Gemini fallback`);
   } else {
-    console.log(`${c.dim}  ○ Vision disabled (no vision model or GEMINI_API_KEY)${c.reset}`);
+    console.log(`${PAD}${c.dim}○ Vision disabled (no vision model or GEMINI_API_KEY)${c.reset}`);
   }
 
   // Initialize MCP client
@@ -279,22 +280,22 @@ function initProject() {
   mcpClient = new McpClient(mcpUrl ? { url: mcpUrl } : {});
   setMcpClient(mcpClient);
 
-  console.log(`${c.cyan}  ✓${c.reset} Mode: always agentic ${c.dim}(reads files on demand, streams final response)${c.reset}`);
+  console.log(`${PAD}${c.cyan}✓${c.reset} Mode: always agentic ${c.dim}(reads files on demand, streams final response)${c.reset}`);
 }
 
 async function checkConnection() {
   const connected = await lmStudio.isConnected();
   if (connected) {
-    console.log(`${c.green}  ✓${c.reset} LM Studio: Connected (${lmStudio.baseUrl})`);
+    console.log(`${PAD}${c.green}✓${c.reset} LM Studio: Connected (${lmStudio.baseUrl})`);
 
     // Auto-discover model IDs
     const discovery = await modelRegistry.discover();
     if (discovery.matched > 0) {
-      console.log(`${c.green}  ✓${c.reset} Models: ${discovery.matched} matched from ${discovery.total} loaded`);
+      console.log(`${PAD}${c.green}✓${c.reset} Models: ${discovery.matched} matched from ${discovery.total} loaded`);
     }
   } else {
-    console.log(`${c.red}  ✗${c.reset} Cannot connect to LM Studio at ${lmStudio.baseUrl}`);
-    console.log(`${c.dim}    Make sure LM Studio is running${c.reset}\n`);
+    console.log(`${PAD}${c.red}✗${c.reset} Cannot connect to LM Studio at ${lmStudio.baseUrl}`);
+    console.log(`${PAD}${c.dim}  Make sure LM Studio is running${c.reset}\n`);
     return false;
   }
 
@@ -303,10 +304,10 @@ async function checkConnection() {
   if (mcpConnected) {
     const status = mcpClient.getStatus();
     const serverLabel = status.serverName ? `${status.serverName}` : 'assistant-mcp';
-    console.log(`${c.green}  ✓${c.reset} MCP: ${serverLabel} ${c.dim}(${status.url})${c.reset}`);
+    console.log(`${PAD}${c.green}✓${c.reset} MCP: ${serverLabel} ${c.dim}(${status.url})${c.reset}`);
   } else {
-    console.log(`${c.yellow}  ○${c.reset} MCP: Not connected ${c.dim}(${mcpClient.url})${c.reset}`);
-    console.log(`${c.dim}    Tools like get_tasks, get_calendar will fail. Set mcpUrl with /set${c.reset}`);
+    console.log(`${PAD}${c.yellow}○${c.reset} MCP: Not connected ${c.dim}(${mcpClient.url})${c.reset}`);
+    console.log(`${PAD}${c.dim}  Tools like get_tasks, get_calendar will fail. Set mcpUrl with /set${c.reset}`);
   }
 
   return true;
@@ -365,8 +366,8 @@ async function loadMentionedFiles(message) {
 
 class StreamingWordWrapper {
   constructor(maxWidth = null) {
-    // Use terminal width minus some padding, or default to 80
-    this.maxWidth = maxWidth || Math.min(process.stdout.columns - 4 || 76, 100);
+    // Use terminal width minus padding on both sides
+    this.maxWidth = maxWidth || Math.max((process.stdout.columns || 80) - PAD.length * 2, 40);
     this.currentLineLength = 0;
     this.wordBuffer = '';
   }
@@ -376,16 +377,16 @@ class StreamingWordWrapper {
 
     for (const char of text) {
       if (char === '\n') {
-        // Flush word buffer and reset line
-        output += this.wordBuffer + '\n';
+        // Flush word buffer and reset line, pad next line
+        output += this.wordBuffer + '\n' + PAD;
         this.wordBuffer = '';
-        this.currentLineLength = 0;
+        this.currentLineLength = PAD.length;
       } else if (char === ' ' || char === '\t') {
         // Word boundary - check if we need to wrap
         if (this.currentLineLength + this.wordBuffer.length + 1 > this.maxWidth && this.currentLineLength > 0) {
-          // Wrap to new line
-          output += '\n' + this.wordBuffer + char;
-          this.currentLineLength = this.wordBuffer.length + 1;
+          // Wrap to new line with padding
+          output += '\n' + PAD + this.wordBuffer + char;
+          this.currentLineLength = PAD.length + this.wordBuffer.length + 1;
         } else {
           output += this.wordBuffer + char;
           this.currentLineLength += this.wordBuffer.length + 1;
@@ -474,24 +475,24 @@ function loadCustomCommand(cmd) {
  */
 function listCustomCommands() {
   if (!fs.existsSync(COMMANDS_DIR)) {
-    console.log(`\n${c.dim}  No custom commands directory found at ${COMMANDS_DIR}${c.reset}\n`);
+    console.log(`\n${PAD}${c.dim}No custom commands directory found at ${COMMANDS_DIR}${c.reset}\n`);
     return;
   }
 
   const files = fs.readdirSync(COMMANDS_DIR).filter(f => f.endsWith('.md')).sort();
   if (files.length === 0) {
-    console.log(`\n${c.dim}  No custom commands found in ${COMMANDS_DIR}${c.reset}\n`);
+    console.log(`\n${PAD}${c.dim}No custom commands found in ${COMMANDS_DIR}${c.reset}\n`);
     return;
   }
 
-  console.log(`\n${c.cyan}  Custom Commands${c.reset} ${c.dim}(${COMMANDS_DIR})${c.reset}\n`);
+  console.log(`\n${PAD}${c.cyan}Custom Commands${c.reset} ${c.dim}(${COMMANDS_DIR})${c.reset}\n`);
   for (const file of files) {
     const name = file.replace('.md', '');
     // Read first non-empty, non-heading line as description
     const content = fs.readFileSync(path.join(COMMANDS_DIR, file), 'utf-8');
     const lines = content.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
     const desc = lines[0] || '';
-    console.log(`  ${c.green}/${name}${c.reset}  ${c.dim}${desc.slice(0, 60)}${c.reset}`);
+    console.log(`${PAD}${c.green}/${name}${c.reset}  ${c.dim}${desc.slice(0, 60)}${c.reset}`);
   }
   console.log();
 }
@@ -512,7 +513,7 @@ async function handleCommand(input) {
       return true;
 
     case '/update': {
-      console.log(`\n${c.cyan}  Checking for updates...${c.reset}`);
+      console.log(`\n${PAD}${c.cyan}Checking for updates...${c.reset}`);
       const { execSync } = require('child_process');
       try {
         const result = execSync('npm install -g mrchevyceleb/ripley-code', {
@@ -520,26 +521,26 @@ async function handleCommand(input) {
           timeout: 60000,
           stdio: ['pipe', 'pipe', 'pipe']
         });
-        console.log(`${c.green}  ✓ Updated! Restart Ripley to use the new version.${c.reset}\n`);
+        console.log(`${PAD}${c.green}✓ Updated! Restart Ripley to use the new version.${c.reset}\n`);
       } catch (err) {
-        console.log(`${c.red}  ✗ Update failed: ${err.message}${c.reset}\n`);
+        console.log(`${PAD}${c.red}✗ Update failed: ${err.message}${c.reset}\n`);
       }
       return true;
     }
 
     case '/version':
     case '/v':
-      console.log(`\n${c.cyan}  Ripley Code v${VERSION}${c.reset}\n`);
+      console.log(`\n${PAD}${c.cyan}Ripley Code v${VERSION}${c.reset}\n`);
       return true;
 
     case '/files':
     case '/ls':
       const files = contextBuilder.getLoadedFiles();
       if (files.length === 0) {
-        console.log(`\n${c.dim}  No files in context${c.reset}\n`);
+        console.log(`\n${PAD}${c.dim}No files in context${c.reset}\n`);
       } else {
-        console.log(`\n${c.cyan}  Files in context (${files.length}):${c.reset}`);
-        files.forEach(f => console.log(`${c.dim}    • ${f}${c.reset}`));
+        console.log(`\n${PAD}${c.cyan}Files in context (${files.length}):${c.reset}`);
+        files.forEach(f => console.log(`${PAD}${c.dim}  • ${f}${c.reset}`));
         console.log();
       }
       return true;
@@ -547,7 +548,7 @@ async function handleCommand(input) {
     case '/read':
     case '/add':
       if (!args) {
-        console.log(`\n${c.yellow}  Usage: /read <filepath>${c.reset}\n`);
+        console.log(`\n${PAD}${c.yellow}Usage: /read <filepath>${c.reset}\n`);
         return true;
       }
       if (args.includes('*')) {
@@ -555,7 +556,7 @@ async function handleCommand(input) {
         try {
           const matches = await glob(args, { cwd: projectDir, nodir: true });
           if (matches.length === 0) {
-            console.log(`\n${c.yellow}  No files matched: ${args}${c.reset}\n`);
+            console.log(`\n${PAD}${c.yellow}No files matched: ${args}${c.reset}\n`);
           } else {
             let count = 0;
             for (const file of matches.slice(0, 20)) {
@@ -565,22 +566,22 @@ async function handleCommand(input) {
                 if (watcher.isEnabled()) watcher.addFile(file);
               }
             }
-            console.log(`\n${c.green}  ✓ Added ${count} files to context${c.reset}\n`);
+            console.log(`\n${PAD}${c.green}  ✓ Added ${count} files to context${c.reset}\n`);
           }
         } catch (error) {
-          console.log(`\n${c.red}  ✗ Invalid pattern: ${error.message}${c.reset}\n`);
+          console.log(`\n${PAD}${c.red}✗ Invalid pattern: ${error.message}${c.reset}\n`);
         }
       } else {
         const readResult = contextBuilder.loadFile(args);
         if (readResult.success) {
           if (readResult.alreadyLoaded) {
-            console.log(`\n${c.yellow}  File already in context: ${args}${c.reset}\n`);
+            console.log(`\n${PAD}${c.yellow}File already in context: ${args}${c.reset}\n`);
           } else {
-            console.log(`\n${c.green}  ✓ Added to context: ${args}${c.reset}\n`);
+            console.log(`\n${PAD}${c.green}  ✓ Added to context: ${args}${c.reset}\n`);
             if (watcher.isEnabled()) watcher.addFile(args);
           }
         } else {
-          console.log(`\n${c.red}  ✗ ${readResult.error}${c.reset}\n`);
+          console.log(`\n${PAD}${c.red}✗ ${readResult.error}${c.reset}\n`);
         }
       }
       return true;
@@ -588,83 +589,83 @@ async function handleCommand(input) {
     case '/unread':
     case '/remove':
       if (!args) {
-        console.log(`\n${c.yellow}  Usage: /unread <filepath>${c.reset}\n`);
+        console.log(`\n${PAD}${c.yellow}Usage: /unread <filepath>${c.reset}\n`);
         return true;
       }
       const unreadResult = contextBuilder.unloadFile(args);
       if (unreadResult.success) {
-        console.log(`\n${c.green}  ✓ Removed from context: ${args}${c.reset}\n`);
+        console.log(`\n${PAD}${c.green}  ✓ Removed from context: ${args}${c.reset}\n`);
         watcher.removeFile(args);
       } else {
-        console.log(`\n${c.red}  ✗ ${unreadResult.error}${c.reset}\n`);
+        console.log(`\n${PAD}${c.red}✗ ${unreadResult.error}${c.reset}\n`);
       }
       return true;
 
     case '/tree':
       const structure = contextBuilder.scanDirectory();
       const tree = contextBuilder.buildTreeString(structure);
-      console.log(`\n${c.cyan}  Project Structure:${c.reset}\n`);
+      console.log(`\n${PAD}${c.cyan}Project Structure:${c.reset}\n`);
       console.log(tree);
       return true;
 
     case '/find':
       if (!args) {
-        console.log(`\n${c.yellow}  Usage: /find <pattern>${c.reset}\n`);
+        console.log(`\n${PAD}${c.yellow}Usage: /find <pattern>${c.reset}\n`);
         return true;
       }
       try {
         const { glob } = require('glob');
         const matches = await glob(args, { cwd: projectDir, nodir: true, ignore: ['node_modules/**', '.git/**'] });
         if (matches.length === 0) {
-          console.log(`\n${c.dim}  No files found matching: ${args}${c.reset}\n`);
+          console.log(`\n${PAD}${c.dim}No files found matching: ${args}${c.reset}\n`);
         } else {
-          console.log(`\n${c.cyan}  Files matching "${args}" (${matches.length}):${c.reset}`);
-          matches.slice(0, 30).forEach(f => console.log(`${c.dim}    ${f}${c.reset}`));
-          if (matches.length > 30) console.log(`${c.dim}    ... and ${matches.length - 30} more${c.reset}`);
+          console.log(`\n${PAD}${c.cyan}Files matching "${args}" (${matches.length}):${c.reset}`);
+          matches.slice(0, 30).forEach(f => console.log(`${PAD}${c.dim}  ${f}${c.reset}`));
+          if (matches.length > 30) console.log(`${PAD}${c.dim}  ... and ${matches.length - 30} more${c.reset}`);
           console.log();
         }
       } catch (error) {
-        console.log(`\n${c.red}  ✗ ${error.message}${c.reset}\n`);
+        console.log(`\n${PAD}${c.red}✗ ${error.message}${c.reset}\n`);
       }
       return true;
 
     case '/grep':
     case '/search':
       if (!args) {
-        console.log(`\n${c.yellow}  Usage: /grep <text>${c.reset}\n`);
+        console.log(`\n${PAD}${c.yellow}Usage: /grep <text>${c.reset}\n`);
         return true;
       }
-      console.log(`\n${c.dim}  Searching for "${args}"...${c.reset}`);
+      console.log(`\n${PAD}${c.dim}Searching for "${args}"...${c.reset}`);
       try {
         const results = await searchInFiles(args);
         if (results.length === 0) {
-          console.log(`${c.dim}  No matches found${c.reset}\n`);
+          console.log(`${PAD}${c.dim}No matches found${c.reset}\n`);
         } else {
-          console.log(`\n${c.cyan}  Found ${results.length} matches:${c.reset}`);
+          console.log(`\n${PAD}${c.cyan}Found ${results.length} matches:${c.reset}`);
           results.slice(0, 20).forEach(r => {
-            console.log(`${c.green}  ${r.file}${c.reset}:${c.yellow}${r.line}${c.reset}`);
-            console.log(`${c.dim}    ${r.text.trim().substring(0, 80)}${c.reset}`);
+            console.log(`${PAD}${c.green}  ${r.file}${c.reset}:${c.yellow}${r.line}${c.reset}`);
+            console.log(`${PAD}${c.dim}  ${r.text.trim().substring(0, 80)}${c.reset}`);
           });
-          if (results.length > 20) console.log(`${c.dim}  ... and ${results.length - 20} more${c.reset}`);
+          if (results.length > 20) console.log(`${PAD}${c.dim}... and ${results.length - 20} more${c.reset}`);
           console.log();
         }
       } catch (error) {
-        console.log(`${c.red}  ✗ ${error.message}${c.reset}\n`);
+        console.log(`${PAD}${c.red}✗ ${error.message}${c.reset}\n`);
       }
       return true;
 
     case '/image':
       if (!args) {
-        console.log(`\n${c.yellow}  Usage: /image <path>${c.reset}`);
-        console.log(`${c.dim}  Add an image to the next message (for vision models)${c.reset}\n`);
+        console.log(`\n${PAD}${c.yellow}Usage: /image <path>${c.reset}`);
+        console.log(`${PAD}${c.dim}Add an image to the next message (for vision models)${c.reset}\n`);
         return true;
       }
       const imgResult = imageHandler.addImage(args);
       if (imgResult.success) {
-        console.log(`\n${c.green}  ✓ Image queued: ${args}${c.reset}`);
-        console.log(`${c.dim}  Will be included in your next message${c.reset}\n`);
+        console.log(`\n${PAD}${c.green}  ✓ Image queued: ${args}${c.reset}`);
+        console.log(`${PAD}${c.dim}Will be included in your next message${c.reset}\n`);
       } else {
-        console.log(`\n${c.red}  ✗ ${imgResult.error}${c.reset}\n`);
+        console.log(`\n${PAD}${c.red}✗ ${imgResult.error}${c.reset}\n`);
       }
       return true;
 
@@ -674,17 +675,17 @@ async function handleCommand(input) {
         const result = await commandRunner.git('status --short');
         if (result.success) {
           if (result.stdout) {
-            console.log(`\n${c.cyan}  Git Status:${c.reset}`);
-            console.log(result.stdout.split('\n').map(l => `  ${l}`).join('\n'));
+            console.log(`\n${PAD}${c.cyan}Git Status:${c.reset}`);
+            console.log(result.stdout.split('\n').map(l => PAD + l).join('\n'));
             console.log();
           } else {
-            console.log(`\n${c.green}  ✓ Working tree clean${c.reset}\n`);
+            console.log(`\n${PAD}${c.green}  ✓ Working tree clean${c.reset}\n`);
           }
         } else {
-          console.log(`\n${c.dim}  Not a git repository${c.reset}\n`);
+          console.log(`\n${PAD}${c.dim}Not a git repository${c.reset}\n`);
         }
       } catch {
-        console.log(`\n${c.dim}  Git not available${c.reset}\n`);
+        console.log(`\n${PAD}${c.dim}Git not available${c.reset}\n`);
       }
       return true;
 
@@ -692,14 +693,14 @@ async function handleCommand(input) {
       try {
         const result = await commandRunner.git('diff --stat');
         if (result.success && result.stdout) {
-          console.log(`\n${c.cyan}  Uncommitted Changes:${c.reset}`);
-          console.log(result.stdout.split('\n').map(l => `  ${l}`).join('\n'));
+          console.log(`\n${PAD}${c.cyan}Uncommitted Changes:${c.reset}`);
+          console.log(result.stdout.split('\n').map(l => PAD + l).join('\n'));
           console.log();
         } else {
-          console.log(`\n${c.dim}  No uncommitted changes${c.reset}\n`);
+          console.log(`\n${PAD}${c.dim}No uncommitted changes${c.reset}\n`);
         }
       } catch {
-        console.log(`\n${c.dim}  Git not available${c.reset}\n`);
+        console.log(`\n${PAD}${c.dim}Git not available${c.reset}\n`);
       }
       return true;
 
@@ -707,14 +708,14 @@ async function handleCommand(input) {
       try {
         const result = await commandRunner.git('log --oneline -10');
         if (result.success && result.stdout) {
-          console.log(`\n${c.cyan}  Recent Commits:${c.reset}`);
-          console.log(result.stdout.split('\n').map(l => `  ${l}`).join('\n'));
+          console.log(`\n${PAD}${c.cyan}Recent Commits:${c.reset}`);
+          console.log(result.stdout.split('\n').map(l => PAD + l).join('\n'));
           console.log();
         } else {
-          console.log(`\n${c.dim}  No commits yet${c.reset}\n`);
+          console.log(`\n${PAD}${c.dim}No commits yet${c.reset}\n`);
         }
       } catch {
-        console.log(`\n${c.dim}  Git not available${c.reset}\n`);
+        console.log(`\n${PAD}${c.dim}Git not available${c.reset}\n`);
       }
       return true;
 
@@ -725,48 +726,48 @@ async function handleCommand(input) {
       contextBuilder.loadPriorityFiles();
       tokenCounter.resetSession();
       imageHandler.clearPending();
-      console.log(`\n${c.green}  ✓ Cleared conversation and reset context${c.reset}\n`);
+      console.log(`\n${PAD}${c.green}  ✓ Cleared conversation and reset context${c.reset}\n`);
       return true;
 
     case '/clearhistory':
       conversationHistory = [];
       lastKnownTokens = 0;
       tokenCounter.resetSession();
-      console.log(`\n${c.green}  ✓ Cleared conversation history${c.reset}\n`);
+      console.log(`\n${PAD}${c.green}  ✓ Cleared conversation history${c.reset}\n`);
       return true;
 
     case '/save':
       if (!args) {
-        console.log(`\n${c.yellow}  Usage: /save <session-name>${c.reset}\n`);
+        console.log(`\n${PAD}${c.yellow}Usage: /save <session-name>${c.reset}\n`);
         return true;
       }
       const savedFile = config.saveConversation(args, conversationHistory);
-      console.log(`\n${c.green}  ✓ Saved session: ${savedFile}${c.reset}\n`);
+      console.log(`\n${PAD}${c.green}  ✓ Saved session: ${savedFile}${c.reset}\n`);
       return true;
 
     case '/load':
       if (!args) {
-        console.log(`\n${c.yellow}  Usage: /load <session-file>${c.reset}\n`);
+        console.log(`\n${PAD}${c.yellow}Usage: /load <session-file>${c.reset}\n`);
         return true;
       }
       const loadedHistory = config.loadConversation(args);
       if (loadedHistory) {
         conversationHistory = loadedHistory;
-        console.log(`\n${c.green}  ✓ Loaded ${loadedHistory.length} messages${c.reset}\n`);
+        console.log(`\n${PAD}${c.green}  ✓ Loaded ${loadedHistory.length} messages${c.reset}\n`);
       } else {
-        console.log(`\n${c.red}  ✗ Session not found: ${args}${c.reset}\n`);
+        console.log(`\n${PAD}${c.red}✗ Session not found: ${args}${c.reset}\n`);
       }
       return true;
 
     case '/sessions':
       const sessions = config.listConversations();
       if (sessions.length === 0) {
-        console.log(`\n${c.dim}  No saved sessions${c.reset}\n`);
+        console.log(`\n${PAD}${c.dim}No saved sessions${c.reset}\n`);
       } else {
-        console.log(`\n${c.cyan}  Saved Sessions:${c.reset}`);
+        console.log(`\n${PAD}${c.cyan}Saved Sessions:${c.reset}`);
         sessions.slice(0, 10).forEach(s => {
           const date = new Date(s.savedAt).toLocaleDateString();
-          console.log(`${c.dim}    • ${s.filename} (${s.messageCount} messages, ${date})${c.reset}`);
+          console.log(`${PAD}${c.dim}  • ${s.filename} (${s.messageCount} messages, ${date})${c.reset}`);
         });
         console.log();
       }
@@ -779,38 +780,38 @@ async function handleCommand(input) {
       const loadedFiles = contextBuilder.getLoadedFiles();
       const limit = tokenCounter.checkLimit(tokenEstimate);
 
-      console.log(`\n${c.cyan}  Context Summary:${c.reset}`);
-      console.log(`${c.dim}    Files loaded: ${loadedFiles.length}${c.reset}`);
-      console.log(`${c.dim}    Characters: ${charCount.toLocaleString()}${c.reset}`);
-      console.log(`${c.dim}    Est. tokens: ~${tokenEstimate.toLocaleString()}${c.reset}`);
+      console.log(`\n${PAD}${c.cyan}Context Summary:${c.reset}`);
+      console.log(`${PAD}${c.dim}  Files loaded: ${loadedFiles.length}${c.reset}`);
+      console.log(`${PAD}${c.dim}  Characters: ${charCount.toLocaleString()}${c.reset}`);
+      console.log(`${PAD}${c.dim}  Est. tokens: ~${tokenEstimate.toLocaleString()}${c.reset}`);
       if (limit.isWarning) {
-        console.log(`${c.yellow}    ⚠ ${Math.round(limit.percentage * 100)}% of token limit${c.reset}`);
+        console.log(`${PAD}${c.yellow}  ⚠ ${Math.round(limit.percentage * 100)}% of token limit${c.reset}`);
       }
-      console.log(`${c.dim}    Compact mode: ${config.get('compactMode') ? 'ON' : 'OFF'}${c.reset}`);
-      console.log(`${c.dim}    Streaming: ${config.get('streamingEnabled') ? 'ON' : 'OFF'}${c.reset}`);
-      console.log(`${c.dim}    Watch mode: ${watcher.isEnabled() ? 'ON' : 'OFF'}${c.reset}`);
+      console.log(`${PAD}${c.dim}  Compact mode: ${config.get('compactMode') ? 'ON' : 'OFF'}${c.reset}`);
+      console.log(`${PAD}${c.dim}  Streaming: ${config.get('streamingEnabled') ? 'ON' : 'OFF'}${c.reset}`);
+      console.log(`${PAD}${c.dim}  Watch mode: ${watcher.isEnabled() ? 'ON' : 'OFF'}${c.reset}`);
       console.log();
       return true;
 
     case '/tokens':
       const usage = tokenCounter.getSessionUsage();
-      console.log(`\n${c.cyan}  Token Usage This Session:${c.reset}`);
-      console.log(`${c.dim}    Input:  ${tokenCounter.formatCount(usage.input)}${c.reset}`);
-      console.log(`${c.dim}    Output: ${tokenCounter.formatCount(usage.output)}${c.reset}`);
-      console.log(`${c.dim}    Total:  ${tokenCounter.formatCount(usage.total)}${c.reset}`);
+      console.log(`\n${PAD}${c.cyan}Token Usage This Session:${c.reset}`);
+      console.log(`${PAD}${c.dim}  Input:  ${tokenCounter.formatCount(usage.input)}${c.reset}`);
+      console.log(`${PAD}${c.dim}  Output: ${tokenCounter.formatCount(usage.output)}${c.reset}`);
+      console.log(`${PAD}${c.dim}  Total:  ${tokenCounter.formatCount(usage.total)}${c.reset}`);
       console.log();
       return true;
 
     case '/think':
       if (!modelRegistry.currentSupportsThinking()) {
-        console.log(`\n${c.yellow}  ⚠ Current model (${modelRegistry.getCurrent()}) doesn't support thinking mode.${c.reset}`);
-        console.log(`${c.dim}  Switch to gpt-oss (/model gpt-oss) to use thinking.${c.reset}\n`);
+        console.log(`\n${PAD}${c.yellow}⚠ Current model (${modelRegistry.getCurrent()}) doesn't support thinking mode.${c.reset}`);
+        console.log(`${PAD}${c.dim}Switch to gpt-oss (/model gpt-oss) to use thinking.${c.reset}\n`);
       } else {
         thinkingMode = !thinkingMode;
         const thinkIcon = thinkingMode ? `${c.cyan}🧠 ON${c.reset}` : `${c.dim}OFF${c.reset}`;
-        console.log(`\n${c.green}  ✓ Thinking mode: ${thinkIcon}${c.reset}`);
+        console.log(`\n${PAD}${c.green}  ✓ Thinking mode: ${thinkIcon}${c.reset}`);
         if (thinkingMode) {
-          console.log(`${c.dim}  gpt-oss will reason before responding. Slower but smarter.${c.reset}`);
+          console.log(`${PAD}${c.dim}gpt-oss will reason before responding. Slower but smarter.${c.reset}`);
         }
         console.log();
       }
@@ -819,8 +820,8 @@ async function handleCommand(input) {
     case '/ctx':
       if (!args) {
         const currentCtx = modelRegistry.getContextLimit();
-        console.log(`\n${c.cyan}  Context: ${(currentCtx / 1024).toFixed(0)}K${c.reset} ${c.dim}(${currentCtx.toLocaleString()} tokens)${c.reset}`);
-        console.log(`${c.dim}  Usage: /ctx 16k | /ctx 32k | /ctx 64k | /ctx 131072${c.reset}\n`);
+        console.log(`\n${PAD}${c.cyan}Context: ${(currentCtx / 1024).toFixed(0)}K${c.reset} ${c.dim}(${currentCtx.toLocaleString()} tokens)${c.reset}`);
+        console.log(`${PAD}${c.dim}Usage: /ctx 16k | /ctx 32k | /ctx 64k | /ctx 131072${c.reset}\n`);
         return true;
       }
       // Parse context size: "16k", "32K", "65536", etc.
@@ -832,50 +833,50 @@ async function handleCommand(input) {
         newCtx = parseInt(args.trim());
       }
       if (!newCtx || isNaN(newCtx) || newCtx < 1024) {
-        console.log(`\n${c.red}  Invalid context size. Use: /ctx 16k, /ctx 32k, /ctx 131072${c.reset}\n`);
+        console.log(`\n${PAD}${c.red}Invalid context size. Use: /ctx 16k, /ctx 32k, /ctx 131072${c.reset}\n`);
         return true;
       }
       try {
         const currentModelData = modelRegistry.getCurrentModel();
         if (!currentModelData?.id) {
-          console.log(`\n${c.red}  No model loaded.${c.reset}\n`);
+          console.log(`\n${PAD}${c.red}No model loaded.${c.reset}\n`);
           return true;
         }
         // Unload current model
-        console.log(`${c.dim}  Reloading ${currentModelData.name} with ${(newCtx / 1024).toFixed(0)}K context...${c.reset}`);
+        console.log(`${PAD}${c.dim}Reloading ${currentModelData.name} with ${(newCtx / 1024).toFixed(0)}K context...${c.reset}`);
         const loadedInstances = await lmStudio.getLoadedInstances();
         for (const inst of loadedInstances) {
           try { await lmStudio.unloadModel(inst.instanceId); } catch {}
         }
         // Reload with new context
         const ctxResult = await lmStudio.loadModel(currentModelData.id, { contextLength: newCtx });
-        console.log(`${c.green}  ✓ Reloaded with ${(newCtx / 1024).toFixed(0)}K context${c.reset} ${c.dim}(${ctxResult.load_time_seconds?.toFixed(1)}s)${c.reset}\n`);
+        console.log(`${PAD}${c.green}✓ Reloaded with ${(newCtx / 1024).toFixed(0)}K context${c.reset} ${c.dim}(${ctxResult.load_time_seconds?.toFixed(1)}s)${c.reset}\n`);
       } catch (err) {
-        console.log(`\n${c.red}  Failed: ${err.message}${c.reset}`);
-        console.log(`${c.dim}  Try loading manually in LM Studio with reduced context${c.reset}\n`);
+        console.log(`\n${PAD}${c.red}Failed: ${err.message}${c.reset}`);
+        console.log(`${PAD}${c.dim}Try loading manually in LM Studio with reduced context${c.reset}\n`);
       }
       return true;
 
     case '/compact':
       const newCompact = !config.get('compactMode');
       config.set('compactMode', newCompact);
-      console.log(`\n${c.green}  ✓ Compact mode: ${newCompact ? 'ON' : 'OFF'}${c.reset}\n`);
+      console.log(`\n${PAD}${c.green}  ✓ Compact mode: ${newCompact ? 'ON' : 'OFF'}${c.reset}\n`);
       return true;
 
     case '/stream':
       const newStream = !config.get('streamingEnabled');
       config.set('streamingEnabled', newStream);
-      console.log(`\n${c.green}  ✓ Streaming: ${newStream ? 'ON' : 'OFF'}${c.reset}\n`);
+      console.log(`\n${PAD}${c.green}  ✓ Streaming: ${newStream ? 'ON' : 'OFF'}${c.reset}\n`);
       return true;
 
     case '/watch':
       if (watcher.isEnabled()) {
         watcher.stop();
-        console.log(`\n${c.green}  ✓ Watch mode: OFF${c.reset}\n`);
+        console.log(`\n${PAD}${c.green}  ✓ Watch mode: OFF${c.reset}\n`);
       } else {
         watcher.start();
-        console.log(`\n${c.green}  ✓ Watch mode: ON${c.reset}`);
-        console.log(`${c.dim}    Watching ${watcher.getWatchedFiles().length} files${c.reset}\n`);
+        console.log(`\n${PAD}${c.green}  ✓ Watch mode: ON${c.reset}`);
+        console.log(`${PAD}${c.dim}  Watching ${watcher.getWatchedFiles().length} files${c.reset}\n`);
       }
       return true;
 
@@ -884,41 +885,41 @@ async function handleCommand(input) {
       config.set('yoloMode', newYolo);
       if (newYolo) {
         console.log(`\n${c.orange}  🔥 YOLO MODE: ON${c.reset}`);
-        console.log(`${c.dim}    File changes and commands will be applied automatically without confirmation.${c.reset}`);
-        console.log(`${c.dim}    Dangerous commands still require typing 'yes'.${c.reset}\n`);
+        console.log(`${PAD}${c.dim}  File changes and commands will be applied automatically without confirmation.${c.reset}`);
+        console.log(`${PAD}${c.dim}  Dangerous commands still require typing 'yes'.${c.reset}\n`);
       } else {
-        console.log(`\n${c.green}  ✓ YOLO mode: OFF${c.reset}`);
-        console.log(`${c.dim}    Back to normal confirmation prompts.${c.reset}\n`);
+        console.log(`\n${PAD}${c.green}  ✓ YOLO mode: OFF${c.reset}`);
+        console.log(`${PAD}${c.dim}  Back to normal confirmation prompts.${c.reset}\n`);
       }
       return true;
 
     case '/agent':
-      console.log(`\n${c.cyan}  Ripley is always agentic.${c.reset}`);
-      console.log(`${c.dim}    The AI reads files on demand and streams the final response.${c.reset}\n`);
+      console.log(`\n${PAD}${c.cyan}Ripley is always agentic.${c.reset}`);
+      console.log(`${PAD}${c.dim}  The AI reads files on demand and streams the final response.${c.reset}\n`);
       return true;
 
     case '/plan':
       if (interactionMode === 'plan') {
         interactionMode = 'code';
-        console.log(`\n${c.green}  ✓ Switched to CODE mode${c.reset}`);
-        console.log(`${c.dim}    File operations and commands will be executed normally.${c.reset}\n`);
+        console.log(`\n${PAD}${c.green}  ✓ Switched to CODE mode${c.reset}`);
+        console.log(`${PAD}${c.dim}  File operations and commands will be executed normally.${c.reset}\n`);
       } else {
         interactionMode = 'plan';
-        console.log(`\n${c.cyan}  📋 PLAN MODE: ON${c.reset}`);
-        console.log(`${c.dim}    AI will create a plan (saved to .ripley/plan.md) instead of code.${c.reset}`);
-        console.log(`${c.dim}    Use /implement to execute the plan, or /plan to switch back.${c.reset}\n`);
+        console.log(`\n${PAD}${c.cyan}📋 PLAN MODE: ON${c.reset}`);
+        console.log(`${PAD}${c.dim}  AI will create a plan (saved to .ripley/plan.md) instead of code.${c.reset}`);
+        console.log(`${PAD}${c.dim}  Use /implement to execute the plan, or /plan to switch back.${c.reset}\n`);
       }
       return true;
 
     case '/implement':
       const planPath = path.join(projectDir, '.ripley', 'plan.md');
       if (!fs.existsSync(planPath)) {
-        console.log(`\n${c.yellow}  No plan found. Use /plan mode first to create one.${c.reset}\n`);
+        console.log(`\n${PAD}${c.yellow}No plan found. Use /plan mode first to create one.${c.reset}\n`);
         return true;
       }
       const planContent = fs.readFileSync(planPath, 'utf-8');
-      console.log(`\n${c.cyan}  📋 Plan to implement:${c.reset}\n`);
-      console.log(planContent.split('\n').map(l => `  ${l}`).join('\n'));
+      console.log(`\n${PAD}${c.cyan}📋 Plan to implement:${c.reset}\n`);
+      console.log(planContent.split('\n').map(l => PAD + l).join('\n'));
       console.log();
 
       const confirmImpl = await askQuestion(`${c.yellow}Implement this plan? (y/n): ${c.reset}`);
@@ -926,34 +927,34 @@ async function handleCommand(input) {
         // Switch to code mode and send the plan for implementation
         const prevMode = interactionMode;
         interactionMode = 'code';
-        console.log(`\n${c.cyan}  🚀 Implementing plan...${c.reset}\n`);
+        console.log(`\n${PAD}${c.cyan}🚀 Implementing plan...${c.reset}\n`);
         await sendMessage(`Please implement this plan:\n\n${planContent}\n\nApply the changes now using <file_operation> tags.`);
         interactionMode = prevMode;
       } else {
-        console.log(`${c.dim}  Plan not implemented.${c.reset}\n`);
+        console.log(`${PAD}${c.dim}Plan not implemented.${c.reset}\n`);
       }
       return true;
 
     case '/ask':
       if (interactionMode === 'ask') {
         interactionMode = 'code';
-        console.log(`\n${c.green}  ✓ Switched to CODE mode${c.reset}`);
-        console.log(`${c.dim}    File operations and commands will be executed normally.${c.reset}\n`);
+        console.log(`\n${PAD}${c.green}  ✓ Switched to CODE mode${c.reset}`);
+        console.log(`${PAD}${c.dim}  File operations and commands will be executed normally.${c.reset}\n`);
       } else {
         interactionMode = 'ask';
         console.log(`\n${c.magenta}  💬 ASK MODE: ON${c.reset}`);
-        console.log(`${c.dim}    Question-only mode - AI will answer questions without generating code operations.${c.reset}`);
-        console.log(`${c.dim}    Use /ask again to switch back to code mode.${c.reset}\n`);
+        console.log(`${PAD}${c.dim}  Question-only mode - AI will answer questions without generating code operations.${c.reset}`);
+        console.log(`${PAD}${c.dim}  Use /ask again to switch back to code mode.${c.reset}\n`);
       }
       return true;
 
     case '/mode':
       const modeColors = { code: c.green, plan: c.cyan, ask: c.magenta };
       const modeIcons = { code: '⚡', plan: '📋', ask: '💬' };
-      console.log(`\n  Current mode: ${modeColors[interactionMode]}${modeIcons[interactionMode]} ${interactionMode.toUpperCase()}${c.reset}`);
-      console.log(`${c.dim}    /plan - Preview changes without executing${c.reset}`);
-      console.log(`${c.dim}    /ask  - Question-only mode (no operations)${c.reset}`);
-      console.log(`${c.dim}    Use /plan or /ask again to return to code mode${c.reset}\n`);
+      console.log(`\n${PAD}Current mode: ${modeColors[interactionMode]}${modeIcons[interactionMode]} ${interactionMode.toUpperCase()}${c.reset}`);
+      console.log(`${PAD}${c.dim}  /plan - Preview changes without executing${c.reset}`);
+      console.log(`${PAD}${c.dim}  /ask  - Question-only mode (no operations)${c.reset}`);
+      console.log(`${PAD}${c.dim}  Use /plan or /ask again to return to code mode${c.reset}\n`);
       return true;
 
     case '/prompt':
@@ -974,21 +975,21 @@ async function handleCommand(input) {
         if (selectedPrompt) {
           activePrompt = selectedPrompt.key;
           config.set('activePrompt', selectedPrompt.key);
-          console.log(`${c.green}  ✓ Prompt: ${selectedPrompt.key}${c.reset}\n`);
+          console.log(`${PAD}${c.green}✓ Prompt: ${selectedPrompt.key}${c.reset}\n`);
         } else {
-          console.log(`${c.dim}  Cancelled${c.reset}\n`);
+          console.log(`${PAD}${c.dim}Cancelled${c.reset}\n`);
         }
         return true;
       }
 
       if (!promptManager.has(requestedPrompt)) {
-        console.log(`\n${c.red}  Unknown prompt: "${requestedPrompt}". Available: ${promptManager.list().join(', ')}${c.reset}\n`);
+        console.log(`\n${PAD}${c.red}Unknown prompt: "${requestedPrompt}". Available: ${promptManager.list().join(', ')}${c.reset}\n`);
         return true;
       }
 
       activePrompt = requestedPrompt;
       config.set('activePrompt', requestedPrompt);
-      console.log(`\n${c.green}  ✓ Prompt: ${requestedPrompt}${c.reset}\n`);
+      console.log(`\n${PAD}${c.green}  ✓ Prompt: ${requestedPrompt}${c.reset}\n`);
       return true;
 
     case '/model':
@@ -1003,12 +1004,12 @@ async function handleCommand(input) {
         lastKnownTokens = 0; // Reset context counter for new model
         const switched = modelRegistry.getCurrentModel();
 
-        console.log(`${c.green}  ✓ Model: ${switched.name}${c.reset} ${c.dim}(${switched.key})${c.reset}`);
+        console.log(`${PAD}${c.green}✓ Model: ${switched.name}${c.reset} ${c.dim}(${switched.key})${c.reset}`);
 
         // Show auto-prompt switch
         const autoPrompt = modelRegistry.getPrompt();
         if (promptManager.has(autoPrompt)) {
-          console.log(`${c.dim}  Prompt: ${autoPrompt}${c.reset}`);
+          console.log(`${PAD}${c.dim}Prompt: ${autoPrompt}${c.reset}`);
         }
 
         // Load model in LM Studio (unload old one first)
@@ -1019,26 +1020,26 @@ async function handleCommand(input) {
             for (const inst of loaded) {
               try {
                 await lmStudio.unloadModel(inst.instanceId);
-                console.log(`${c.dim}  Unloaded ${inst.displayName || inst.key}${c.reset}`);
+                console.log(`${PAD}${c.dim}Unloaded ${inst.displayName || inst.key}${c.reset}`);
               } catch (err) {
-                console.log(`${c.yellow}  ⚠ Could not unload ${inst.key}: ${err.message}${c.reset}`);
+                console.log(`${PAD}${c.yellow}⚠ Could not unload ${inst.key}: ${err.message}${c.reset}`);
               }
             }
             const ctxLen = switched.contextLimit || 32768;
-            console.log(`${c.dim}  Loading ${switched.name} in LM Studio (ctx: ${(ctxLen / 1024).toFixed(0)}K)...${c.reset}`);
+            console.log(`${PAD}${c.dim}Loading ${switched.name} in LM Studio (ctx: ${(ctxLen / 1024).toFixed(0)}K)...${c.reset}`);
             const result = await lmStudio.loadModel(switched.id, { contextLength: ctxLen });
-            console.log(`${c.green}  ✓ Loaded in ${result.load_time_seconds?.toFixed(1)}s${c.reset}`);
+            console.log(`${PAD}${c.green}✓ Loaded in ${result.load_time_seconds?.toFixed(1)}s${c.reset}`);
           } catch (err) {
-            console.log(`${c.yellow}  ⚠ Could not auto-load: ${err.message}${c.reset}`);
-            console.log(`${c.dim}  Load it manually in LM Studio${c.reset}`);
+            console.log(`${PAD}${c.yellow}⚠ Could not auto-load: ${err.message}${c.reset}`);
+            console.log(`${PAD}${c.dim}Load it manually in LM Studio${c.reset}`);
           }
         }
 
         if (switched.tags?.includes('max-quality')) {
-          console.log(`${c.yellow}  ⚠ This model may be slow (spills to CPU)${c.reset}`);
+          console.log(`${PAD}${c.yellow}⚠ This model may be slow (spills to CPU)${c.reset}`);
         }
         if (switched.tags?.includes('vision')) {
-          console.log(`${c.green}  ✓ Vision enabled (local)${c.reset}`);
+          console.log(`${PAD}${c.green}✓ Vision enabled (local)${c.reset}`);
         }
         console.log();
       }
@@ -1059,7 +1060,7 @@ async function handleCommand(input) {
         if (selected) {
           await switchModel(selected.key);
         } else {
-          console.log(`${c.dim}  Cancelled${c.reset}\n`);
+          console.log(`${PAD}${c.dim}Cancelled${c.reset}\n`);
         }
         return true;
       }
@@ -1067,12 +1068,12 @@ async function handleCommand(input) {
       try {
         await switchModel(modelArg);
       } catch (err) {
-        console.log(`\n${c.red}  ✗ ${err.message}${c.reset}\n`);
+        console.log(`\n${PAD}${c.red}✗ ${err.message}${c.reset}\n`);
       }
       return true;
 
     case '/mcp':
-      console.log(`\n${c.cyan}  MCP Server Status${c.reset}`);
+      console.log(`\n${PAD}${c.cyan}MCP Server Status${c.reset}`);
       try {
         const mcpConnected = await mcpClient.isConnected();
         const mcpStatus = mcpClient.getStatus();
@@ -1080,39 +1081,39 @@ async function handleCommand(input) {
         if (mcpConnected) {
           const serverLabel = mcpStatus.serverName || 'assistant-mcp';
           const serverVer = mcpStatus.serverVersion ? ` v${mcpStatus.serverVersion}` : '';
-          console.log(`${c.green}  ✓ Connected${c.reset} to ${serverLabel}${serverVer}`);
-          console.log(`${c.dim}    URL: ${mcpStatus.url}${c.reset}`);
+          console.log(`${PAD}${c.green}✓ Connected${c.reset} to ${serverLabel}${serverVer}`);
+          console.log(`${PAD}${c.dim}  URL: ${mcpStatus.url}${c.reset}`);
           if (mcpStatus.sessionId) {
-            console.log(`${c.dim}    Session: ${mcpStatus.sessionId}${c.reset}`);
+            console.log(`${PAD}${c.dim}  Session: ${mcpStatus.sessionId}${c.reset}`);
           }
 
           // List available tools
           try {
             const tools = await mcpClient.listTools();
-            console.log(`\n${c.cyan}  Available Tools (${tools.length}):${c.reset}`);
+            console.log(`\n${PAD}${c.cyan}Available Tools (${tools.length}):${c.reset}`);
             for (const tool of tools) {
-              console.log(`${c.yellow}    ${tool.name}${c.reset}${tool.description ? ` ${c.dim}- ${tool.description.slice(0, 60)}${c.reset}` : ''}`);
+              console.log(`${PAD}${c.yellow}  ${tool.name}${c.reset}${tool.description ? ` ${c.dim}- ${tool.description.slice(0, 60)}${c.reset}` : ''}`);
             }
           } catch (toolErr) {
-            console.log(`\n${c.yellow}  Could not list tools: ${toolErr.message}${c.reset}`);
+            console.log(`\n${PAD}${c.yellow}Could not list tools: ${toolErr.message}${c.reset}`);
           }
         } else {
-          console.log(`${c.red}  ✗ Not connected${c.reset}`);
-          console.log(`${c.dim}    URL: ${mcpStatus.url}${c.reset}`);
-          console.log(`${c.dim}    Set URL: /set mcpUrl <url>${c.reset}`);
+          console.log(`${PAD}${c.red}✗ Not connected${c.reset}`);
+          console.log(`${PAD}${c.dim}  URL: ${mcpStatus.url}${c.reset}`);
+          console.log(`${PAD}${c.dim}  Set URL: /set mcpUrl <url>${c.reset}`);
         }
       } catch (mcpErr) {
-        console.log(`${c.red}  ✗ Error: ${mcpErr.message}${c.reset}`);
+        console.log(`${PAD}${c.red}✗ Error: ${mcpErr.message}${c.reset}`);
       }
       console.log();
       return true;
 
     case '/config':
       const allConfig = config.getAll();
-      console.log(`\n${c.cyan}  Configuration:${c.reset}`);
+      console.log(`\n${PAD}${c.cyan}Configuration:${c.reset}`);
       Object.entries(allConfig).forEach(([key, value]) => {
         const displayValue = Array.isArray(value) ? `[${value.length} items]` : String(value);
-        console.log(`${c.dim}    ${key}: ${c.white}${displayValue}${c.reset}`);
+        console.log(`${PAD}${c.dim}  ${key}: ${c.white}${displayValue}${c.reset}`);
       });
       console.log();
       return true;
@@ -1120,8 +1121,8 @@ async function handleCommand(input) {
     case '/set':
       const setParts = args.split(/\s+/);
       if (setParts.length < 2) {
-        console.log(`\n${c.yellow}  Usage: /set <key> <value>${c.reset}`);
-        console.log(`${c.dim}  Example: /set compactMode true${c.reset}\n`);
+        console.log(`\n${PAD}${c.yellow}Usage: /set <key> <value>${c.reset}`);
+        console.log(`${PAD}${c.dim}Example: /set compactMode true${c.reset}\n`);
         return true;
       }
       const [setKey, ...setValueParts] = setParts;
@@ -1132,23 +1133,23 @@ async function handleCommand(input) {
       else if (!isNaN(Number(setValue))) setValue = Number(setValue);
 
       config.set(setKey, setValue);
-      console.log(`\n${c.green}  ✓ Set ${setKey} = ${setValue}${c.reset}\n`);
+      console.log(`\n${PAD}${c.green}  ✓ Set ${setKey} = ${setValue}${c.reset}\n`);
       return true;
 
     case '/instructions':
       const existingInstructions = config.getInstructions();
       if (existingInstructions) {
-        console.log(`\n${c.cyan}  Project Instructions (${existingInstructions.source}):${c.reset}`);
+        console.log(`\n${PAD}${c.cyan}Project Instructions (${existingInstructions.source}):${c.reset}`);
         const preview = existingInstructions.content.substring(0, 500);
-        console.log(`${c.dim}${preview}${existingInstructions.content.length > 500 ? '...' : ''}${c.reset}`);
+        console.log(`${PAD}${c.dim}${preview}${existingInstructions.content.length > 500 ? '...' : ''}${c.reset}`);
         const editPath = existingInstructions.source === 'RIPLEY.md'
           ? path.join(projectDir, 'RIPLEY.md')
           : path.join(projectDir, '.ripley', 'instructions.md');
-        console.log(`\n${c.dim}  Edit: ${editPath}${c.reset}\n`);
+        console.log(`\n${PAD}${c.dim}Edit: ${editPath}${c.reset}\n`);
       } else {
         config.createDefaultInstructions();
-        console.log(`\n${c.green}  ✓ Created RIPLEY.md${c.reset}`);
-        console.log(`${c.dim}  Edit: ${path.join(projectDir, 'RIPLEY.md')}${c.reset}\n`);
+        console.log(`\n${PAD}${c.green}  ✓ Created RIPLEY.md${c.reset}`);
+        console.log(`${PAD}${c.dim}Edit: ${path.join(projectDir, 'RIPLEY.md')}${c.reset}\n`);
       }
       return true;
 
@@ -1156,10 +1157,10 @@ async function handleCommand(input) {
     case '/exec':
     case '/$':
       if (!args) {
-        console.log(`\n${c.yellow}  Usage: /run <command>${c.reset}\n`);
+        console.log(`\n${PAD}${c.yellow}Usage: /run <command>${c.reset}\n`);
         return true;
       }
-      console.log(`\n${c.dim}  Running: ${args}${c.reset}\n`);
+      console.log(`\n${PAD}${c.dim}Running: ${args}${c.reset}\n`);
       try {
         const result = await commandRunner.run(args, {
           onStdout: data => process.stdout.write(data),
@@ -1167,7 +1168,7 @@ async function handleCommand(input) {
         });
         console.log(`\n${result.success ? c.green : c.red}  Exit code: ${result.code}${c.reset}\n`);
       } catch (error) {
-        console.log(`\n${c.red}  Error: ${error.message}${c.reset}\n`);
+        console.log(`\n${PAD}${c.red}Error: ${error.message}${c.reset}\n`);
       }
       return true;
 
@@ -1175,12 +1176,12 @@ async function handleCommand(input) {
     case '/backups':
       const backups = fileManager.getBackups();
       if (backups.length === 0) {
-        console.log(`\n${c.dim}  No backups available${c.reset}\n`);
+        console.log(`\n${PAD}${c.dim}No backups available${c.reset}\n`);
       } else {
-        console.log(`\n${c.cyan}  Recent backups:${c.reset}`);
+        console.log(`\n${PAD}${c.cyan}Recent backups:${c.reset}`);
         backups.slice(0, 10).forEach(b => {
           const time = new Date(b.timestamp).toLocaleString();
-          console.log(`${c.dim}    • ${b.name} (${time})${c.reset}`);
+          console.log(`${PAD}${c.dim}  • ${b.name} (${time})${c.reset}`);
         });
         console.log();
       }
@@ -1188,14 +1189,14 @@ async function handleCommand(input) {
 
     case '/restore':
       if (!args) {
-        console.log(`\n${c.yellow}  Usage: /restore <filepath>${c.reset}\n`);
+        console.log(`\n${PAD}${c.yellow}Usage: /restore <filepath>${c.reset}\n`);
         return true;
       }
       const restoreResult = fileManager.restoreLatest(args);
       if (restoreResult.success) {
-        console.log(`\n${c.green}  ✓ Restored: ${restoreResult.restored}${c.reset}\n`);
+        console.log(`\n${PAD}${c.green}  ✓ Restored: ${restoreResult.restored}${c.reset}\n`);
       } else {
-        console.log(`\n${c.red}  ✗ ${restoreResult.error}${c.reset}\n`);
+        console.log(`\n${PAD}${c.red}✗ ${restoreResult.error}${c.reset}\n`);
       }
       return true;
 
@@ -1207,7 +1208,7 @@ async function handleCommand(input) {
         config.saveConversation('autosave', conversationHistory);
       }
       watcher.stop();
-      console.log(`\n${c.cyan}  👋 See you later!${c.reset}\n`);
+      console.log(`\n${PAD}${c.cyan}👋 See you later!${c.reset}\n`);
       process.exit(0);
 
     case '/commands':
@@ -1218,8 +1219,8 @@ async function handleCommand(input) {
       // Check for custom commands in ~/.ripley/Commands/
       const customResult = loadCustomCommand(cmd);
       if (customResult) {
-        console.log(`\n${c.cyan}  Running custom command: ${customResult.name}${c.reset}`);
-        console.log(`${c.dim}  Source: ${customResult.source}${c.reset}\n`);
+        console.log(`\n${PAD}${c.cyan}Running custom command: ${customResult.name}${c.reset}`);
+        console.log(`${PAD}${c.dim}Source: ${customResult.source}${c.reset}\n`);
         await sendMessage(customResult.content);
         return true;
       }
@@ -1238,7 +1239,7 @@ async function handleCommand(input) {
 async function compactHistory() {
   if (conversationHistory.length < 4) return; // nothing meaningful to compact
 
-  console.log(`\n${c.yellow}  ⚡ Auto-compacting context...${c.reset}`);
+  console.log(`\n${PAD}${c.yellow}⚡ Auto-compacting context...${c.reset}`);
 
   // Build a summarization prompt from the full history
   const historyText = conversationHistory
@@ -1273,11 +1274,11 @@ async function compactHistory() {
       { role: 'assistant', content: 'Understood. I have the context from our previous conversation.' },
       ...recent
     ];
-    console.log(`${c.green}  ✓ Context compacted (summary + last 2 turns retained)${c.reset}\n`);
+    console.log(`${PAD}${c.green}✓ Context compacted (summary + last 2 turns retained)${c.reset}\n`);
   } catch (err) {
     // Fallback: just trim to last 20 messages
     conversationHistory = conversationHistory.slice(-20);
-    console.log(`${c.yellow}  ⚠ Compaction failed (${err.message}), trimmed to 20 messages${c.reset}\n`);
+    console.log(`${PAD}${c.yellow}⚠ Compaction failed (${err.message}), trimmed to 20 messages${c.reset}\n`);
   }
 }
 
@@ -1285,7 +1286,7 @@ async function sendMessage(message) {
   // Load @ mentioned files
   const loadedFromMentions = await loadMentionedFiles(message);
   if (loadedFromMentions.length > 0) {
-    console.log(`${c.dim}  Loaded: ${loadedFromMentions.join(', ')}${c.reset}`);
+    console.log(`${PAD}${c.dim}Loaded: ${loadedFromMentions.join(', ')}${c.reset}`);
   }
 
   // Check for pending images and analyze them with vision AI
@@ -1293,23 +1294,23 @@ async function sendMessage(message) {
   let imageAnalysis = '';
 
   if (pendingImages.length > 0) {
-    console.log(`${c.dim}  Including ${pendingImages.length} image(s)${c.reset}`);
+    console.log(`${PAD}${c.dim}Including ${pendingImages.length} image(s)${c.reset}`);
 
     if (modelRegistry.currentSupportsVision()) {
       // Local vision model - images will be sent directly as multimodal content
-      console.log(`${c.green}  ✓ Using local vision model${c.reset}`);
+      console.log(`${PAD}${c.green}✓ Using local vision model${c.reset}`);
     } else if (visionAnalyzer.isEnabled()) {
       // Gemini fallback - convert images to text analysis
-      console.log(`${c.cyan}  🔍 Analyzing image(s) with Gemini...${c.reset}`);
+      console.log(`${PAD}${c.cyan}🔍 Analyzing image(s) with Gemini...${c.reset}`);
       const analysis = await visionAnalyzer.analyzeImages(pendingImages, message);
       if (analysis) {
         imageAnalysis = visionAnalyzer.formatForPrompt(analysis);
-        console.log(`${c.green}  ✓ Image analysis complete${c.reset}`);
+        console.log(`${PAD}${c.green}✓ Image analysis complete${c.reset}`);
       } else {
-        console.log(`${c.yellow}  ⚠ Image analysis failed, sending without description${c.reset}`);
+        console.log(`${PAD}${c.yellow}⚠ Image analysis failed, sending without description${c.reset}`);
       }
     } else {
-      console.log(`${c.yellow}  ⚠ No vision capability (load a vision model or set GEMINI_API_KEY)${c.reset}`);
+      console.log(`${PAD}${c.yellow}⚠ No vision capability (load a vision model or set GEMINI_API_KEY)${c.reset}`);
     }
   }
 
@@ -1351,8 +1352,8 @@ async function sendMessage(message) {
   try {
     await sendAgenticMessage(fullMessage, pendingImages, message);
   } catch (error) {
-    console.log(`\n${c.red}  ✗ Error: ${error.message}${c.reset}`);
-    console.log(`${c.dim}    Make sure LM Studio is running at ${lmStudio.baseUrl}${c.reset}\n`);
+    console.log(`\n${PAD}${c.red}✗ Error: ${error.message}${c.reset}`);
+    console.log(`${PAD}${c.dim}  Make sure LM Studio is running at ${lmStudio.baseUrl}${c.reset}\n`);
   }
 }
 
@@ -1409,7 +1410,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     const messages = isGenerating ? generatingMessages : thinkingMessages;
     const currentMessage = messages[messageIndex % messages.length];
     const tokenInfo = isGenerating ? ` ${c.dim}(${tokenCount} tokens)${c.reset}` : '';
-    const statusText = `${c.cyan}  ${spinnerFrames[spinnerIndex]} ${currentMessage}${c.reset}${tokenInfo}`;
+    const statusText = `${PAD}${c.cyan}${spinnerFrames[spinnerIndex]} ${currentMessage}${c.reset}${tokenInfo}`;
 
     // Save cursor, move to status line, clear and write, restore cursor
     if (isGenerating) {
@@ -1426,7 +1427,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
 
   // Start the status animation
   const startThinking = () => {
-    process.stdout.write(`\n${c.cyan}  ${spinnerFrames[0]} ${thinkingMessages[0]}${c.reset}`);
+    process.stdout.write(`\n${PAD}${c.cyan}${spinnerFrames[0]} ${thinkingMessages[0]}${c.reset}`);
     statusInterval = setInterval(updateStatus, 100);
   };
 
@@ -1438,7 +1439,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     // Clear the thinking line and show AI label on same line
     process.stdout.clearLine(0);
     process.stdout.cursorTo(0);
-    process.stdout.write(`${c.cyan}Ripley →${c.reset} `);
+    process.stdout.write(`${PAD}${c.cyan}Ripley →${c.reset} `);
   };
 
   const stopStatus = () => {
@@ -1532,7 +1533,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     },
     onError: (error) => {
       stopStatus();
-      console.log(`\n${c.red}  Stream error: ${error.message}${c.reset}`);
+      console.log(`\n${PAD}${c.red}Stream error: ${error.message}${c.reset}`);
     }
   });
 
@@ -1592,11 +1593,11 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
     process.stdout.clearLine(0);
     process.stdout.cursorTo(0);
-    process.stdout.write(`${c.cyan}  ${spinnerFrames[spinnerIndex]} ${currentStatus}${c.reset}`);
+    process.stdout.write(`${PAD}${c.cyan}${spinnerFrames[spinnerIndex]} ${currentStatus}${c.reset}`);
   };
 
   const startSpinner = () => {
-    process.stdout.write(`\n${c.cyan}  ${spinnerFrames[0]} ${currentStatus}${c.reset}`);
+    process.stdout.write(`\n${PAD}${c.cyan}${spinnerFrames[0]} ${currentStatus}${c.reset}`);
     statusInterval = setInterval(updateSpinner, 100);
   };
 
@@ -1667,15 +1668,15 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
 
           // Show tool call summary
           if (toolCallsDisplayed.length > 0) {
-            console.log(`${c.dim}┌─ ${toolCallsDisplayed.length} action(s)${c.reset}`);
+            console.log(`${PAD}${c.dim}┌─ ${toolCallsDisplayed.length} action(s)${c.reset}`);
             for (const tc of toolCallsDisplayed) {
               const icon = toolMessages[tc.tool]?.split(' ')[0] || '🔧';
-              console.log(`${c.dim}│ ${icon} ${tc.args.path || tc.args.pattern || tc.args.command || tc.tool}${c.reset}`);
+              console.log(`${PAD}${c.dim}│ ${icon} ${tc.args.path || tc.args.pattern || tc.args.command || tc.tool}${c.reset}`);
             }
-            console.log(`${c.dim}└─${c.reset}`);
+            console.log(`${PAD}${c.dim}└─${c.reset}`);
           }
 
-          process.stdout.write(`${c.cyan}Ripley →${c.reset} `);
+          process.stdout.write(`${PAD}${c.cyan}Ripley →${c.reset} `);
         }
 
         // Strip leading think blocks from stream (they arrive token by token)
@@ -1700,15 +1701,15 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       },
       onReasoning: (reasoning) => {
         stopSpinner();
-        console.log(`${c.dim}┌─ 🧠 Reasoning${c.reset}`);
+        console.log(`${PAD}${c.dim}┌─ 🧠 Reasoning${c.reset}`);
         const lines = reasoning.trim().split('\n');
         for (const line of lines) {
-          console.log(`${c.dim}│ ${line}${c.reset}`);
+          console.log(`${PAD}${c.dim}│ ${line}${c.reset}`);
         }
-        console.log(`${c.dim}└─${c.reset}\n`);
+        console.log(`${PAD}${c.dim}└─${c.reset}\n`);
       },
       onWarning: (msg) => {
-        console.log(`\n${c.yellow}  ⚠ ${msg}${c.reset}`);
+        console.log(`\n${PAD}${c.yellow}⚠ ${msg}${c.reset}`);
       }
     });
 
@@ -1745,7 +1746,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     stopSpinner();
     currentAbortController = null;
     if (error.name === 'AbortError') {
-      console.log(`\n\n${c.yellow}  ⚠ Request cancelled${c.reset}\n`);
+      console.log(`\n\n${c.yellow}⚠ Request cancelled${c.reset}\n`);
       return;
     }
     throw error;
@@ -1758,7 +1759,7 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
   const modeColors = { code: c.cyan, plan: c.cyan, ask: c.magenta };
   let i = 0;
   const spinner = setInterval(() => {
-    process.stdout.write(`\r${modeColors[interactionMode]}  ${frames[i]} ${c.dim}Ripley is thinking...${c.reset}`);
+    process.stdout.write(`\r${PAD}${modeColors[interactionMode]}${frames[i]} ${c.dim}Ripley is thinking...${c.reset}`);
     i = (i + 1) % frames.length;
   }, 80);
 
@@ -1812,7 +1813,7 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
     const reply = data.choices?.[0]?.message?.content || '';
 
     const { renderMarkdown } = require('./lib/markdownRenderer');
-    console.log(`\n${c.cyan}Ripley →${c.reset} `);
+    console.log(`\n${PAD}${c.cyan}Ripley →${c.reset} `);
     console.log(renderMarkdown(reply));
     console.log();
 
@@ -1837,8 +1838,8 @@ async function processAIResponse(reply, originalMessage) {
       fs.mkdirSync(ripleyDir, { recursive: true });
     }
     fs.writeFileSync(planPath, reply);
-    console.log(`\n${c.green}  ✓ Plan saved to .ripley/plan.md${c.reset}`);
-    console.log(`${c.cyan}  Use /implement to execute this plan${c.reset}\n`);
+    console.log(`\n${PAD}${c.green}  ✓ Plan saved to .ripley/plan.md${c.reset}`);
+    console.log(`${PAD}${c.cyan}Use /implement to execute this plan${c.reset}\n`);
 
     // Update conversation history
     conversationHistory.push({ role: 'user', content: originalMessage });
@@ -1853,7 +1854,7 @@ async function processAIResponse(reply, originalMessage) {
   if (parsed.fileOperations.length > 0) {
     if (interactionMode === 'ask') {
       // Ask mode: Ignore file operations completely
-      console.log(`${c.dim}  (${parsed.fileOperations.length} file operation(s) skipped - ASK mode)${c.reset}\n`);
+      console.log(`${PAD}${c.dim}(${parsed.fileOperations.length} file operation(s) skipped - ASK mode)${c.reset}\n`);
     } else {
       // Code mode: Normal execution
       await handleFileOperations(parsed.fileOperations);
@@ -1865,12 +1866,12 @@ async function processAIResponse(reply, originalMessage) {
   if (parsed.commands.length > 0) {
     if (interactionMode === 'ask') {
       // Ask mode: Ignore commands completely
-      console.log(`${c.dim}  (${parsed.commands.length} command(s) skipped - ASK mode)${c.reset}\n`);
+      console.log(`${PAD}${c.dim}(${parsed.commands.length} command(s) skipped - ASK mode)${c.reset}\n`);
     } else if (interactionMode === 'plan') {
       // Plan mode: Show commands but don't execute
-      console.log(`${c.cyan}  📋 Commands that would run:${c.reset}`);
+      console.log(`${PAD}${c.cyan}📋 Commands that would run:${c.reset}`);
       parsed.commands.forEach((cmd, i) => {
-        console.log(`${c.dim}    ${i + 1}. ${cmd}${c.reset}`);
+        console.log(`${PAD}${c.dim}  ${i + 1}. ${cmd}${c.reset}`);
       });
       console.log();
     } else {
@@ -1926,27 +1927,27 @@ async function handleFileOperations(operations) {
           case 'edit':
             result = fileManager.writeFile(op.path, op.content);
             if (result.success) {
-              console.log(`${c.green}  ✓ ${op.action === 'create' ? 'Created' : 'Updated'}: ${op.path}${c.reset}`);
+              console.log(`${PAD}${c.green}✓ ${op.action === 'create' ? 'Created' : 'Updated'}: ${op.path}${c.reset}`);
               contextBuilder.loadFile(op.path);
               if (watcher.isEnabled()) watcher.addFile(op.path);
             } else {
-              console.log(`${c.red}  ✗ Failed: ${op.path} - ${result.error}${c.reset}`);
+              console.log(`${PAD}${c.red}✗ Failed: ${op.path} - ${result.error}${c.reset}`);
             }
             break;
 
           case 'delete':
             result = fileManager.deleteFile(op.path);
             if (result.success) {
-              console.log(`${c.green}  ✓ Deleted: ${op.path}${c.reset}`);
+              console.log(`${PAD}${c.green}✓ Deleted: ${op.path}${c.reset}`);
               contextBuilder.unloadFile(op.path);
               watcher.removeFile(op.path);
             } else {
-              console.log(`${c.red}  ✗ Failed: ${op.path} - ${result.error}${c.reset}`);
+              console.log(`${PAD}${c.red}✗ Failed: ${op.path} - ${result.error}${c.reset}`);
             }
             break;
         }
       } catch (error) {
-        console.log(`${c.red}  ✗ Error: ${error.message}${c.reset}`);
+        console.log(`${PAD}${c.red}✗ Error: ${error.message}${c.reset}`);
       }
     }
     console.log();
@@ -1960,7 +1961,7 @@ async function handleFileOperations(operations) {
     }
     return handleFileOperations(operations); // Ask again
   } else {
-    console.log(`${c.yellow}  Changes not applied${c.reset}\n`);
+    console.log(`${PAD}${c.yellow}Changes not applied${c.reset}\n`);
   }
 }
 
@@ -2024,7 +2025,7 @@ async function handleCommands(commands) {
   console.log(`${c.orange}🔧 Suggested Commands:${c.reset}\n`);
 
   for (const cmd of processedCommands) {
-    console.log(`${c.dim}  $ ${cmd}${c.reset}`);
+    console.log(`${PAD}${c.dim}$ ${cmd}${c.reset}`);
   }
   console.log();
 
@@ -2041,7 +2042,7 @@ async function handleCommands(commands) {
   }
 
   if (!shouldRun) {
-    console.log(`${c.yellow}  Commands not executed${c.reset}\n`);
+    console.log(`${PAD}${c.yellow}Commands not executed${c.reset}\n`);
     return false;
   }
 
@@ -2060,22 +2061,22 @@ async function handleCommands(commands) {
 
         if (fs.existsSync(newCwd)) {
           currentCwd = newCwd;
-          console.log(`\n${c.cyan}  ┌─ ${cmd}${c.reset}`);
-          console.log(`${c.cyan}  └─${c.reset} ${c.green}✓ Changed directory to ${newCwd}${c.reset}`);
+          console.log(`\n${PAD}${c.cyan}┌─ ${cmd}${c.reset}`);
+          console.log(`${PAD}${c.cyan}└─${c.reset} ${c.green}✓ Changed directory to ${newCwd}${c.reset}`);
         } else {
-          console.log(`\n${c.cyan}  ┌─ ${cmd}${c.reset}`);
-          console.log(`${c.cyan}  └─${c.reset} ${c.red}✗ Directory not found: ${newCwd}${c.reset}`);
+          console.log(`\n${PAD}${c.cyan}┌─ ${cmd}${c.reset}`);
+          console.log(`${PAD}${c.cyan}└─${c.reset} ${c.red}✗ Directory not found: ${newCwd}${c.reset}`);
         }
         continue;
       }
 
-      console.log(`\n${c.cyan}  ┌─ Running: ${cmd}${c.reset}`);
-      console.log(`${c.cyan}  │${c.reset}`);
+      console.log(`\n${PAD}${c.cyan}┌─ Running: ${cmd}${c.reset}`);
+      console.log(`${PAD}${c.cyan}│${c.reset}`);
 
       if (commandRunner.isDangerous(cmd)) {
-        const confirm = await askQuestion(`${c.red}  ⚠️  This looks dangerous. Type 'yes' to confirm: ${c.reset}`);
+        const confirm = await askQuestion(`${c.red}⚠️  This looks dangerous. Type 'yes' to confirm: ${c.reset}`);
         if (confirm.toLowerCase() !== 'yes') {
-          console.log(`${c.yellow}  Skipped${c.reset}`);
+          console.log(`${PAD}${c.yellow}Skipped${c.reset}`);
           continue;
         }
       }
@@ -2094,7 +2095,7 @@ async function handleCommands(commands) {
         if (spinnerInterval) return;
         spinnerInterval = setInterval(() => {
           const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-          process.stdout.write(`\r${c.cyan}  │ ${c.dim}${frames[frameIndex]} Working... (${elapsed}s)${c.reset}    `);
+          process.stdout.write(`\r${PAD}${c.cyan}│ ${c.dim}${frames[frameIndex]} Working... (${elapsed}s)${c.reset}    `);
           frameIndex = (frameIndex + 1) % frames.length;
         }, 80);
       };
@@ -2117,7 +2118,7 @@ async function handleCommands(commands) {
             lines.forEach(line => {
               if (line.trim()) {
                 lineCount++;
-                console.log(`${c.cyan}  │${c.reset} ${line}`);
+                console.log(`${PAD}${c.cyan}│${c.reset} ${line}`);
               }
             });
             // Restart spinner if no output for a while
@@ -2131,7 +2132,7 @@ async function handleCommands(commands) {
             const lines = data.toString().split('\n');
             lines.forEach(line => {
               if (line.trim()) {
-                console.log(`${c.cyan}  │${c.reset} ${c.yellow}${line}${c.reset}`);
+                console.log(`${PAD}${c.cyan}│${c.reset} ${c.yellow}${line}${c.reset}`);
               }
             });
           }
@@ -2139,15 +2140,15 @@ async function handleCommands(commands) {
 
         stopSpinner();
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-        console.log(`${c.cyan}  │${c.reset}`);
+        console.log(`${PAD}${c.cyan}│${c.reset}`);
         if (result.success) {
-          console.log(`${c.cyan}  └─${c.reset} ${c.green}✓ Done${c.reset} ${c.dim}(${elapsed}s)${c.reset}`);
+          console.log(`${PAD}${c.cyan}└─${c.reset} ${c.green}✓ Done${c.reset} ${c.dim}(${elapsed}s)${c.reset}`);
         } else {
-          console.log(`${c.cyan}  └─${c.reset} ${c.red}✗ Failed (exit code ${result.code})${c.reset} ${c.dim}(${elapsed}s)${c.reset}`);
+          console.log(`${PAD}${c.cyan}└─${c.reset} ${c.red}✗ Failed (exit code ${result.code})${c.reset} ${c.dim}(${elapsed}s)${c.reset}`);
         }
       } catch (error) {
         stopSpinner();
-        console.log(`${c.cyan}  └─${c.reset} ${c.red}✗ Error: ${error.message}${c.reset}`);
+        console.log(`${PAD}${c.cyan}└─${c.reset} ${c.red}✗ Error: ${error.message}${c.reset}`);
       }
     }
     console.log();
@@ -2217,24 +2218,24 @@ function createReadlineInterface() {
     // --- Alt+V: Paste screenshot from clipboard ---
     if (key.name === 'v' && key.meta) {
       process.stdout.write('\n');
-      console.log(`${c.cyan}  📋 Pasting from clipboard...${c.reset}`);
+      console.log(`${PAD}${c.cyan}📋 Pasting from clipboard...${c.reset}`);
 
       const result = await imageHandler.pasteFromClipboard();
       if (result.success) {
         const sizeKB = Math.round(result.data.size / 1024);
-        console.log(`${c.green}  ✓ Screenshot added (${sizeKB}KB)${c.reset}`);
+        console.log(`${PAD}${c.green}✓ Screenshot added (${sizeKB}KB)${c.reset}`);
 
         if (visionAnalyzer.isEnabled()) {
-          console.log(`${c.cyan}  🔍 Analyzing with Gemini...${c.reset}`);
+          console.log(`${PAD}${c.cyan}🔍 Analyzing with Gemini...${c.reset}`);
           const analysis = await visionAnalyzer.analyzeImage(result.data, '');
           if (analysis) {
-            console.log(`${c.green}  ✓ Image analyzed - ready for your question${c.reset}`);
+            console.log(`${PAD}${c.green}✓ Image analyzed - ready for your question${c.reset}`);
             result.data.analysis = analysis;
           }
         }
-        console.log(`${c.dim}  Type your question about the screenshot${c.reset}`);
+        console.log(`${PAD}${c.dim}Type your question about the screenshot${c.reset}`);
       } else {
-        console.log(`${c.red}  ✗ ${result.error}${c.reset}`);
+        console.log(`${PAD}${c.red}✗ ${result.error}${c.reset}`);
       }
       console.log();
       rl.prompt(true);
@@ -2252,7 +2253,7 @@ function createReadlineInterface() {
         } else {
           // First Escape - show hint
           lastEscapeTime = now;
-          process.stdout.write(`\n${c.dim}  Press Esc again to cancel${c.reset}`);
+          process.stdout.write(`\n${PAD}${c.dim}Press Esc again to cancel${c.reset}`);
         }
       }
       return;
@@ -2314,10 +2315,10 @@ Examples:
       );
       const cfg = new Config(projectDir);
       cfg.createDefaultInstructions();
-      console.log(`${c.green}✓ Initialized Ripley in ${projectDir}${c.reset}`);
-      console.log(`${c.dim}  Edit RIPLEY.md to customize AI behavior${c.reset}`);
+      console.log(`${PAD}${c.green}✓ Initialized Ripley in ${projectDir}${c.reset}`);
+      console.log(`${PAD}${c.dim}Edit RIPLEY.md to customize AI behavior${c.reset}`);
     } else {
-      console.log(`${c.yellow}Ripley already initialized${c.reset}`);
+      console.log(`${PAD}${c.yellow}Ripley already initialized${c.reset}`);
     }
     process.exit(0);
   }
@@ -2332,7 +2333,7 @@ Examples:
   // Enable YOLO mode if started with 'yolo' argument
   if (startInYolo) {
     config.set('yoloMode', true);
-    console.log(`${c.red}  ⚡ YOLO MODE ACTIVE${c.reset} ${c.dim}(auto-applying all changes)${c.reset}`);
+    console.log(`${PAD}${c.red}⚡ YOLO MODE ACTIVE${c.reset} ${c.dim}(auto-applying all changes)${c.reset}`);
   }
 
   const connected = await checkConnection();
@@ -2340,7 +2341,7 @@ Examples:
     process.exit(1);
   }
 
-  console.log(`\n${c.dim}  Type ${c.yellow}/help${c.reset}${c.dim} for commands • ${c.yellow}@file${c.reset}${c.dim} to add files • ${c.yellow}/exit${c.reset}${c.dim} to quit${c.reset}\n`);
+  console.log(`\n${PAD}${c.dim}Type ${c.yellow}/help${c.reset}${c.dim} for commands • ${c.yellow}@file${c.reset}${c.dim} to add files • ${c.yellow}/exit${c.reset}${c.dim} to quit${c.reset}\n`);
 
   // Create readline with history support
   rl = createReadlineInterface();
@@ -2385,7 +2386,7 @@ Examples:
     const modelName = modelRegistry.getCurrent() || '?';
     const ctxPct = getContextPercent();
     const thinkIndicator = (thinkingMode && modelRegistry.currentSupportsThinking()) ? ` ${c.cyan}🧠${c.reset}` : '';
-    return `${modeIndicators[interactionMode]} ${c.dim}[${modelName}]${c.reset}${thinkIndicator} ${c.dim}ctx:${c.reset}${ctxPct} ${c.orange}You → ${c.reset}`;
+    return `${PAD}${modeIndicators[interactionMode]} ${c.dim}[${modelName}]${c.reset}${thinkIndicator} ${c.dim}ctx:${c.reset}${ctxPct} ${c.orange}You → ${c.reset}`;
   };
 
   // Paste detection: buffer rapid lines and combine them into one message.
@@ -2420,7 +2421,7 @@ Examples:
     if (trimmed.startsWith('/') && !trimmed.includes('\n')) {
       const handled = await handleCommand(trimmed);
       if (!handled) {
-        console.log(`\n${c.dim}  Unknown command. Type /help or /commands for available commands.${c.reset}\n`);
+        console.log(`\n${PAD}${c.dim}Unknown command. Type /help or /commands for available commands.${c.reset}\n`);
       }
       showPrompt();
       return;
@@ -2440,7 +2441,7 @@ Examples:
     pasteTimer = null;
 
     if (lineCount > 1) {
-      console.log(`${c.dim}  (pasted ${lineCount} lines)${c.reset}`);
+      console.log(`${PAD}${c.dim}(pasted ${lineCount} lines)${c.reset}`);
     }
 
     await processInput(fullInput);
@@ -2482,7 +2483,7 @@ process.on('SIGINT', () => {
     config.saveConversation('autosave', conversationHistory);
   }
   if (watcher) watcher.stop();
-  console.log(`\n${c.cyan}  👋 See you later!${c.reset}\n`);
+  console.log(`\n${PAD}${c.cyan}👋 See you later!${c.reset}\n`);
   process.exit(0);
 });
 
