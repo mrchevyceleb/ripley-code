@@ -206,8 +206,15 @@ function initProject() {
     modelRegistry.setCurrent(modelRegistry.getDefault());
   }
 
-  // Restore active prompt from config
-  activePrompt = config.get('activePrompt') || 'base';
+  // Set active prompt from the model's configured prompt (so it matches what agentic mode uses)
+  const modelPromptName = modelRegistry.getPrompt();
+  if (promptManager.has(modelPromptName)) {
+    activePrompt = modelPromptName;
+  } else if (promptManager.has('code-agent')) {
+    activePrompt = 'code-agent';
+  } else {
+    activePrompt = config.get('activePrompt') || 'base';
+  }
 
   // Try to get Gemini API key from: 1) project config, 2) global config, 3) env var
   let geminiKey = config.get('geminiApiKey');
@@ -1288,7 +1295,8 @@ async function sendMessage(message) {
   };
   collectFiles(structure);
 
-  let fullMessage = `## Project Overview\n\nWorking directory: ${projectDir}\n\nFiles available (use read_file to examine if needed):\n${fileList.slice(0, 20).join('\n')}${fileList.length > 20 ? `\n... and ${fileList.length - 20} more (use list_files to explore)` : ''}`;
+  const FILE_LIST_CAP = 50;
+  let fullMessage = `## Project Overview\n\nWorking directory: ${projectDir}\n\nFiles available (use read_file to examine if needed):\n${fileList.slice(0, FILE_LIST_CAP).join('\n')}${fileList.length > FILE_LIST_CAP ? `\n... and ${fileList.length - FILE_LIST_CAP} more (use list_files to explore)` : ''}`;
 
   // NOTE: Project instructions (RIPLEY.md) are now injected in the system prompt,
   // not here in the user message. This gives them higher priority with local models.
@@ -1399,14 +1407,21 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     }
   };
 
-  // Determine which prompt to use
+  // Determine which prompt to use - mirror agentic path's model-specific logic
   let promptMode;
   if (interactionMode === 'plan' && promptManager.has('plan')) {
     promptMode = 'plan';
   } else if (interactionMode === 'ask') {
     promptMode = 'base';
   } else {
-    promptMode = activePrompt;
+    const streamModelPrompt = modelRegistry.getPrompt();
+    if (promptManager.has(streamModelPrompt)) {
+      promptMode = streamModelPrompt;
+    } else if (promptManager.has('code-agent')) {
+      promptMode = 'code-agent';
+    } else {
+      promptMode = activePrompt;
+    }
   }
 
   // Build messages array for LM Studio
@@ -1707,12 +1722,19 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
   }, 80);
 
   try {
-    // Determine prompt
+    // Determine prompt - mirror agentic path's model-specific logic
     let promptMode;
     if (interactionMode === 'ask') {
       promptMode = 'base';
     } else {
-      promptMode = activePrompt;
+      const compactModelPrompt = modelRegistry.getPrompt();
+      if (promptManager.has(compactModelPrompt)) {
+        promptMode = compactModelPrompt;
+      } else if (promptManager.has('code-agent')) {
+        promptMode = 'code-agent';
+      } else {
+        promptMode = activePrompt;
+      }
     }
 
     // Build messages array
@@ -2219,7 +2241,6 @@ Ripley Code v${VERSION} - AI Coding Agent
 Usage:
   ripley              Start interactive mode
   ripley yolo         Start in YOLO mode (auto-apply all changes)
-  ripley update       Update to latest version from GitHub
   ripley init         Initialize .ripley config
   ripley <request>    One-shot mode
 
@@ -2239,22 +2260,6 @@ Examples:
 
   if (args.includes('--version') || args.includes('-v')) {
     console.log(`Ripley Code v${VERSION}`);
-    process.exit(0);
-  }
-
-  if (args[0] === 'update') {
-    console.log('Checking for updates...');
-    const { execSync } = require('child_process');
-    try {
-      execSync('npm install -g mrchevyceleb/ripley-code', {
-        encoding: 'utf-8',
-        timeout: 60000,
-        stdio: 'inherit'
-      });
-      console.log('\n✓ Updated! Run "ripley" to start the new version.');
-    } catch {
-      console.error('\n✗ Update failed. Try: npm install -g mrchevyceleb/ripley-code');
-    }
     process.exit(0);
   }
 
