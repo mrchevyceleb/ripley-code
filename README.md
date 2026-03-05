@@ -61,8 +61,9 @@ Switch between models with friendly names:
 /model vision-fast  Switch to Qwen3 VL 8B
 /model chat         Switch to GPT-OSS 20B
 /model mistral      Switch to Mistral Small 24B
-/model anthropic:claude-sonnet-4.7   Switch to connected Anthropic model
+/model anthropic:claude-sonnet-4.6   Switch to connected Anthropic model
 /model openai:codex-5.3-medium       Switch to connected OpenAI Codex model
+/model search gemini                 Search OpenRouter catalog and add/switch model
 ```
 
 Connect remote providers:
@@ -118,6 +119,7 @@ Add custom prompts by dropping `.md` files in the `prompts/` directory:
 | `/ask` | Toggle ASK mode (questions only) |
 | `/yolo` | Toggle YOLO mode (auto-apply) |
 | `/agent` | Toggle agentic mode (AI reads files on demand) |
+| `/steer <message>` | Steer next turn, or interrupt + redirect a running turn |
 | `/model [name]` | Show/switch model |
 | `/connect [provider]` | Connect/manage remote providers |
 | `/prompt [name]` | Show/switch system prompt |
@@ -196,6 +198,22 @@ This file provides project-specific instructions to Ripley Code.
 
 Also supports the legacy `.ripley/instructions.md` as a fallback.
 
+## Steering Messages
+
+Use `/steer` to inject additional guidance into the next turn without editing prompts:
+
+```text
+/steer Focus on minimal diffs and skip refactors unless requested
+/steer status
+/steer show
+/steer clear
+/steer on
+/steer off
+```
+
+Queued steering messages are inserted as extra user guidance before your next request, then automatically consumed after a successful turn.
+If a turn is currently running, enter `/steer <text>` and press Enter to interrupt and continue with the new steering.
+
 ## Environment Variables
 
 | Variable | Purpose | Default |
@@ -204,6 +222,11 @@ Also supports the legacy `.ripley/instructions.md` as a fallback.
 | `GEMINI_API_KEY` | Gemini vision fallback | — |
 | `ANTHROPIC_API_KEY` | Anthropic API key fallback (if not saved via `/connect`) | — |
 | `OPENROUTER_API_KEY` | OpenRouter API key fallback (if not saved via `/connect`) | — |
+| `RIPLEY_DEBUG` | Enable/disable debug logging (`1`/`0`) | `1` (enabled by default) |
+| `RIPLEY_DEBUG_PATH` | Debug log file path | `~/.ripley/logs/ripley-YYYY-MM-DD.log` |
+
+By default, Ripley writes debug logs to `~/.ripley/logs/` on every run.
+Set `RIPLEY_DEBUG=0` to turn this off.
 
 ## Changelog
 

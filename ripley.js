@@ -54,6 +54,7 @@ const InlineComplete = require('./lib/inlineComplete');
 
 const VERSION = '4.0.0';
 const PAD = '  '; // Global left padding for all output
+const DEBUG_DISABLED_VALUES = new Set(['0', 'false', 'off', 'no']);
 
 // =============================================================================
 // GLOBALS
@@ -81,6 +82,8 @@ let inlineComplete = null;
 let conversationHistory = [];
 let lastKnownTokens = 0; // Track actual token usage from API responses
 let rl = null;
+let runtimeLogPath = null;
+let sessionEndLogged = false;
 
 // Interaction modes: 'work' (default), 'plan' (explore + structured plan), 'ask' (no operations)
 let interactionMode = 'work';
@@ -91,28 +94,134 @@ let activePrompt = 'base';
 // Thinking mode: when enabled, models that support it will reason before answering
 let thinkingMode = false;
 
+// Queued steering inputs to inject before the next request(s)
+let queuedSteeringMessages = [];
+let midTurnSteerRequested = false;
+
 // Abort controller for cancelling requests with Escape (double-press)
 let currentAbortController = null;
 let lastEscapeTime = 0;
+
+function isDebugLoggingEnabled() {
+  const raw = (process.env.RIPLEY_DEBUG || '').trim().toLowerCase();
+  if (!raw) return true; // default ON for active development
+  return !DEBUG_DISABLED_VALUES.has(raw);
+}
+
+function defaultDebugLogPath() {
+  const day = new Date().toISOString().slice(0, 10);
+  return path.join(os.homedir(), '.ripley', 'logs', `ripley-${day}.log`);
+}
+
+function appendDebugLog(line) {
+  if (!isDebugLoggingEnabled()) return;
+  const target = process.env.RIPLEY_DEBUG_PATH || runtimeLogPath || defaultDebugLogPath();
+  try {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.appendFileSync(target, line, 'utf-8');
+  } catch {
+    // Logging is best-effort; never fail user flow.
+  }
+}
+
+function initDebugLogging() {
+  const enabled = isDebugLoggingEnabled();
+  process.env.RIPLEY_DEBUG = enabled ? '1' : '0';
+  if (!enabled) return null;
+
+  const configured = (process.env.RIPLEY_DEBUG_PATH || '').trim();
+  const target = configured || defaultDebugLogPath();
+  process.env.RIPLEY_DEBUG_PATH = target;
+  runtimeLogPath = target;
+
+  appendDebugLog(
+    `\n=== session_start ${new Date().toISOString()} pid=${process.pid} version=${VERSION} cwd=${projectDir} ===\n`
+  );
+  return target;
+}
+
+function logSessionEnd(reason, detail = '') {
+  if (sessionEndLogged) return;
+  sessionEndLogged = true;
+  appendDebugLog(`=== session_end ${new Date().toISOString()} reason=${reason}${detail} ===\n`);
+}
 
 // =============================================================================
 // ASCII ART & UI
 // =============================================================================
 
-function showBanner() {
-  console.clear();
-  console.log(`
-${c.orange}${PAD}██████╗ ██╗██████╗ ██╗     ███████╗██╗   ██╗
-${PAD}██╔══██╗██║██╔══██╗██║     ██╔════╝╚██╗ ██╔╝
-${PAD}██████╔╝██║██████╔╝██║     █████╗   ╚████╔╝
-${PAD}██╔══██╗██║██╔═══╝ ██║     ██╔══╝    ╚██╔╝
-${PAD}██║  ██║██║██║     ███████╗███████╗   ██║
-${PAD}╚═╝  ╚═╝╚═╝╚═╝     ╚══════╝╚══════╝   ╚═╝
-${c.reset}
-${PAD}${c.cyan}═══════════════════════════════════════════${c.reset}
-${PAD}${c.dim}Ripley Code • v${VERSION} • Local + Remote Models${c.reset}
-${PAD}${c.cyan}═══════════════════════════════════════════${c.reset}
-`);
+const BANNER_ART_LINES = [
+  '██████╗ ██╗██████╗ ██╗     ███████╗██╗   ██╗',
+  '██╔══██╗██║██╔══██╗██║     ██╔════╝╚██╗ ██╔╝',
+  '██████╔╝██║██████╔╝██║     █████╗   ╚████╔╝',
+  '██╔══██╗██║██╔═══╝ ██║     ██╔══╝    ╚██╔╝',
+  '██║  ██║██║██║     ███████╗███████╗   ██║',
+  '╚═╝  ╚═╝╚═╝╚═╝     ╚══════╝╚══════╝   ╚═╝'
+];
+const BANNER_WIDTH = 43;
+const ANIM_DISABLED_VALUES = new Set(['1', 'true', 'yes', 'on']);
+const BANNER_ANIMATION_TOTAL_MS = 8000;
+const BANNER_PULSE_STEPS = 6;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function shouldAnimateBanner() {
+  const disabled = (process.env.RIPLEY_NO_ANIM || '').trim().toLowerCase();
+  if (ANIM_DISABLED_VALUES.has(disabled)) return false;
+  return Boolean(process.stdout.isTTY) && !Boolean(process.env.CI);
+}
+
+function renderBannerFrame(activeLine = null, forceColor = null) {
+  const logo = BANNER_ART_LINES
+    .map((line, i) => {
+      let color = forceColor || c.orange;
+      if (!forceColor && activeLine !== null) {
+        if (i === activeLine) color = c.yellow;
+        else if (i > activeLine) color = c.gray;
+      }
+      return `${color}${PAD}${line}${c.reset}`;
+    })
+    .join('\n');
+
+  const separator = `${PAD}${c.cyan}${'═'.repeat(BANNER_WIDTH)}${c.reset}`;
+  const subtitle = `${PAD}${c.dim}Ripley Code • v${VERSION} • Local + Remote Models${c.reset}`;
+  return `\n${logo}\n${separator}\n${subtitle}\n${separator}\n`;
+}
+
+async function showBanner() {
+  const animate = shouldAnimateBanner();
+  const canControlCursor = Boolean(process.stdout.isTTY);
+  if (canControlCursor) process.stdout.write('\x1b[?25l');
+  try {
+    if (!animate) {
+      console.clear();
+      console.log(renderBannerFrame());
+      return;
+    }
+
+    const totalSteps = BANNER_ART_LINES.length + BANNER_PULSE_STEPS;
+    const stepDelay = Math.max(50, Math.floor(BANNER_ANIMATION_TOTAL_MS / totalSteps));
+
+    for (let i = 0; i < BANNER_ART_LINES.length; i++) {
+      console.clear();
+      console.log(renderBannerFrame(i));
+      await sleep(stepDelay);
+    }
+
+    for (let i = 0; i < BANNER_PULSE_STEPS; i++) {
+      const pulseColor = i % 2 === 0 ? c.yellow : c.orange;
+      console.clear();
+      console.log(renderBannerFrame(null, pulseColor));
+      await sleep(stepDelay);
+    }
+
+    console.clear();
+    console.log(renderBannerFrame());
+  } finally {
+    if (canControlCursor) process.stdout.write('\x1b[?25h');
+  }
 }
 
 function showHelp() {
@@ -151,7 +260,9 @@ ${P}${c.yellow}/ask${c.reset}                Toggle ASK mode (questions only, no
 ${P}${c.yellow}/mode${c.reset}               Show current mode
 ${P}${c.yellow}/yolo${c.reset}               Toggle YOLO mode (auto-apply all changes)
 ${P}${c.yellow}/agent${c.reset}              Show agentic mode info (always on)
-${P}${c.yellow}/model [name]${c.reset}      Show/switch model (nemotron, coder, max, vision...)
+${P}${c.yellow}/steer <text>${c.reset}       Steer next turn (or interrupt + redirect current turn)
+${P}${c.yellow}/model [name]${c.reset}      Show/switch model
+${P}${c.yellow}/model search <query>${c.reset} Search OpenRouter models and add one
 ${P}${c.yellow}/connect [provider]${c.reset} Connect provider (Anthropic, OpenAI OAuth, OpenRouter)
 ${P}${c.yellow}/prompt [name]${c.reset}     Show/switch prompt (base, code-agent, or any .md)
 
@@ -216,7 +327,15 @@ function initProject() {
   modelRegistry = new ModelRegistry(modelsPath, lmStudio, providerStore);
 
   // Restore last active model from config
-  const savedModel = config.get('activeModel');
+  const legacyModelAliasMap = {
+    'anthropic:claude-sonnet-4.7': 'anthropic:claude-sonnet-4.6',
+    'openrouter:claude-sonnet-4.7': 'openrouter:claude-sonnet-4.6'
+  };
+  let savedModel = config.get('activeModel');
+  if (legacyModelAliasMap[savedModel]) {
+    savedModel = legacyModelAliasMap[savedModel];
+    config.set('activeModel', savedModel);
+  }
   if (savedModel && modelRegistry.get(savedModel)) {
     modelRegistry.setCurrent(savedModel);
   } else {
@@ -607,6 +726,93 @@ function modelDisplayParts(model) {
   };
 }
 
+function tokenizeSearchQuery(query) {
+  return String(query || '')
+    .toLowerCase()
+    .split(/\s+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+function parseRemoteContextLimit(model) {
+  const candidates = [
+    model?.contextLength,
+    model?.context_length,
+    model?.maxContextTokens,
+    model?.max_context_tokens
+  ];
+  for (const value of candidates) {
+    const num = Number(value);
+    if (Number.isFinite(num) && num > 0) return Math.floor(num);
+  }
+  return 200000;
+}
+
+function buildAliasFromModelId(modelId, existingAliases = []) {
+  const existing = new Set(existingAliases.map(a => String(a || '').toLowerCase()));
+  let base = String(modelId || '').trim().toLowerCase();
+  if (base.includes('/')) {
+    const parts = base.split('/');
+    base = parts[parts.length - 1] || base;
+  }
+  base = base.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  if (!base) base = 'model';
+  if (base.length > 48) base = base.slice(0, 48).replace(/-+$/g, '');
+
+  if (!existing.has(base)) return base;
+  for (let i = 2; i < 1000; i++) {
+    const candidate = `${base}-${i}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  return `${base}-${Date.now()}`;
+}
+
+async function searchOpenRouterModels(query, options = {}) {
+  const limit = options.limit || 80;
+  const client = await providerManager.getClientForProvider('openrouter');
+  const listed = await client.listModels();
+  if (!Array.isArray(listed) || listed.length === 0) return [];
+
+  const rawQuery = String(query || '').trim().toLowerCase();
+  const tokens = tokenizeSearchQuery(rawQuery);
+
+  const ranked = [];
+  for (const model of listed) {
+    const id = String(model?.id || '').trim();
+    if (!id) continue;
+    const name = String(model?.name || '').trim();
+    const description = String(model?.description || '').trim();
+    const haystack = `${id} ${name} ${description}`.toLowerCase();
+
+    if (tokens.length > 0 && !tokens.every(token => haystack.includes(token))) {
+      continue;
+    }
+
+    let score = 0;
+    if (rawQuery) {
+      const idLower = id.toLowerCase();
+      const nameLower = name.toLowerCase();
+      if (idLower === rawQuery) score += 300;
+      else if (idLower.startsWith(rawQuery)) score += 180;
+      else if (idLower.includes(rawQuery)) score += 110;
+      if (nameLower === rawQuery) score += 200;
+      else if (nameLower.startsWith(rawQuery)) score += 120;
+      else if (nameLower.includes(rawQuery)) score += 80;
+      score += Math.max(0, 40 - Math.min(40, id.length));
+    }
+
+    ranked.push({
+      id,
+      name: name || id,
+      contextLimit: parseRemoteContextLimit(model),
+      score
+    });
+  }
+
+  ranked.sort((a, b) => (b.score - a.score) || a.id.localeCompare(b.id));
+  return ranked.slice(0, limit);
+}
+
 function openUrlInBrowser(url) {
   try {
     const { exec } = require('child_process');
@@ -622,6 +828,50 @@ function openUrlInBrowser(url) {
   } catch {
     return false;
   }
+}
+
+function steeringEnabled() {
+  return !config || config.get('steeringEnabled') !== false;
+}
+
+function normalizeSteeringText(value) {
+  const text = String(value || '').trim();
+  return text;
+}
+
+function queueSteeringMessage(text) {
+  const normalized = normalizeSteeringText(text);
+  if (!normalized) return false;
+  queuedSteeringMessages.push(normalized);
+  return true;
+}
+
+function clearSteeringMessages() {
+  queuedSteeringMessages = [];
+}
+
+function appendQueuedSteeringMessages(messages) {
+  if (!Array.isArray(messages)) return 0;
+  if (!steeringEnabled() || queuedSteeringMessages.length === 0) return 0;
+
+  for (const steeringText of queuedSteeringMessages) {
+    messages.push({
+      role: 'user',
+      content: `## Steering Message\n\nAdditional guidance for this turn:\n\n${steeringText}`
+    });
+  }
+  return queuedSteeringMessages.length;
+}
+
+function requestMidTurnSteer(text) {
+  const normalized = normalizeSteeringText(text);
+  if (!normalized) return false;
+  if (!currentAbortController) return false;
+
+  queueSteeringMessage(normalized);
+  midTurnSteerRequested = true;
+  currentAbortController.abort();
+  return true;
 }
 
 async function switchModel(modelKey, options = {}) {
@@ -681,7 +931,7 @@ async function switchModel(modelKey, options = {}) {
   } else {
     try {
       const client = await providerManager.getClientForModel(switched);
-      const ok = await client.isConnected();
+      const ok = await client.isConnected({ throwOnError: true });
       if (!ok) throw new Error(`${parts.providerLabel} rejected the connection`);
       if (!silent) console.log(`${PAD}${c.green}✓ Connected via ${parts.providerLabel}${c.reset}`);
     } catch (err) {
@@ -1064,6 +1314,7 @@ async function handleCommand(input) {
         console.log(`${PAD}${c.yellow}  ⚠ ${Math.round(limit.percentage * 100)}% of token limit${c.reset}`);
       }
       console.log(`${PAD}${c.dim}  Compact mode: ${config.get('compactMode') ? 'ON' : 'OFF'}${c.reset}`);
+      console.log(`${PAD}${c.dim}  Steering: ${steeringEnabled() ? 'ON' : 'OFF'} (${queuedSteeringMessages.length} pending)${c.reset}`);
       console.log(`${PAD}${c.dim}  Streaming: ${config.get('streamingEnabled') ? 'ON' : 'OFF'}${c.reset}`);
       console.log(`${PAD}${c.dim}  Watch mode: ${watcher.isEnabled() ? 'ON' : 'OFF'}${c.reset}`);
       console.log();
@@ -1092,6 +1343,75 @@ async function handleCommand(input) {
         console.log();
       }
       return true;
+
+    case '/steer':
+    case '/steering': {
+      const steerInput = args.trim();
+
+      if (!steerInput || steerInput === 'status') {
+        console.log(`\n${PAD}${c.cyan}Steering${c.reset}`);
+        console.log(`${PAD}${c.dim}  Enabled: ${steeringEnabled() ? 'ON' : 'OFF'}${c.reset}`);
+        console.log(`${PAD}${c.dim}  Pending messages: ${queuedSteeringMessages.length}${c.reset}`);
+        if (queuedSteeringMessages.length > 0) {
+          queuedSteeringMessages.forEach((msg, idx) => {
+            console.log(`${PAD}${c.dim}  ${idx + 1}. ${msg}${c.reset}`);
+          });
+        }
+        console.log(`${PAD}${c.dim}Usage: /steer <text> | /steer show | /steer clear | /steer on | /steer off${c.reset}\n`);
+        return true;
+      }
+
+      const lowerSteer = steerInput.toLowerCase();
+      if (currentAbortController && !['status', 'show', 'list', 'clear', 'on', 'enable', 'off', 'disable'].includes(lowerSteer)) {
+        if (requestMidTurnSteer(steerInput)) {
+          console.log(`\n${PAD}${c.cyan}Steering received. Redirecting current turn...${c.reset}\n`);
+        } else {
+          console.log(`\n${PAD}${c.yellow}Could not apply mid-turn steering.${c.reset}\n`);
+        }
+        return true;
+      }
+
+      if (lowerSteer === 'show' || lowerSteer === 'list') {
+        if (queuedSteeringMessages.length === 0) {
+          console.log(`\n${PAD}${c.dim}No queued steering messages.${c.reset}\n`);
+          return true;
+        }
+        console.log(`\n${PAD}${c.cyan}Queued Steering Messages:${c.reset}`);
+        queuedSteeringMessages.forEach((msg, idx) => {
+          console.log(`${PAD}${c.dim}  ${idx + 1}. ${msg}${c.reset}`);
+        });
+        console.log();
+        return true;
+      }
+
+      if (lowerSteer === 'clear') {
+        clearSteeringMessages();
+        console.log(`\n${PAD}${c.green}  OK Cleared queued steering messages${c.reset}\n`);
+        return true;
+      }
+
+      if (lowerSteer === 'on' || lowerSteer === 'enable') {
+        config.set('steeringEnabled', true);
+        console.log(`\n${PAD}${c.green}  OK Steering: ON${c.reset}\n`);
+        return true;
+      }
+
+      if (lowerSteer === 'off' || lowerSteer === 'disable') {
+        config.set('steeringEnabled', false);
+        console.log(`\n${PAD}${c.green}  OK Steering: OFF${c.reset}\n`);
+        return true;
+      }
+
+      if (queueSteeringMessage(steerInput)) {
+        if (!steeringEnabled()) {
+          console.log(`\n${PAD}${c.yellow}Warning: Steering is currently OFF. Enable with /steer on.${c.reset}`);
+        }
+        console.log(`${PAD}${c.green}  OK Queued steering message (${queuedSteeringMessages.length} pending)${c.reset}\n`);
+      } else {
+        console.log(`\n${PAD}${c.yellow}Usage: /steer <text>${c.reset}\n`);
+      }
+      return true;
+    }
 
     case '/ctx':
       if (activeProviderKey() !== 'local') {
@@ -1288,7 +1608,8 @@ async function handleCommand(input) {
 
     case '/model':
     case '/models':
-      const modelArg = args.trim().toLowerCase();
+      const modelArgRaw = args.trim();
+      const modelArg = modelArgRaw.toLowerCase();
 
       if (!modelArg) {
         // Interactive model picker
@@ -1302,11 +1623,79 @@ async function handleCommand(input) {
           active: m.key === current
         }));
 
-        const selected = await pick(pickerItems, { title: 'Switch Model' });
+        const selected = await pick(pickerItems, {
+          title: 'Switch Model',
+          showVisionIndicator: true
+        });
         if (selected) {
           await switchModel(selected.key);
         } else {
           console.log(`${PAD}${c.dim}Cancelled${c.reset}\n`);
+        }
+        return true;
+      }
+
+      if (modelArg === 'search' || modelArg.startsWith('search ')) {
+        const query = modelArgRaw.slice('search '.length).trim();
+        if (!query) {
+          console.log(`\n${PAD}${c.yellow}Usage: /model search <query>${c.reset}\n`);
+          return true;
+        }
+
+        const envFallback = !!process.env.OPENROUTER_API_KEY;
+        if (!providerStore.isConnected('openrouter') && !envFallback) {
+          console.log(`\n${PAD}${c.red}âœ— OpenRouter is not connected. Run /connect openrouter.${c.reset}\n`);
+          return true;
+        }
+
+        try {
+          console.log(`\n${PAD}${c.cyan}Searching OpenRouter models for "${query}"...${c.reset}`);
+          const results = await searchOpenRouterModels(query, { limit: 80 });
+          if (results.length === 0) {
+            console.log(`${PAD}${c.yellow}No OpenRouter models matched "${query}".${c.reset}\n`);
+            return true;
+          }
+
+          const pickerItems = results.map((m) => ({
+            key: m.id,
+            label: m.name,
+            description: '',
+            tags: ['openrouter', `ctx:${Math.round(m.contextLimit / 1000)}k`],
+            active: false
+          }));
+
+          const selected = await pick(pickerItems, { title: `OpenRouter Search: "${query}" (${results.length})` });
+          if (!selected) {
+            console.log(`${PAD}${c.dim}Cancelled${c.reset}\n`);
+            return true;
+          }
+
+          const selectedId = selected.key;
+          const existingModels = providerStore.getModels('openrouter');
+          const selectedIdLower = String(selectedId || '').toLowerCase();
+          const existingEntry = Object.entries(existingModels).find(([, model]) =>
+            String(model?.id || '').toLowerCase() === selectedIdLower
+          );
+
+          let alias;
+          if (existingEntry) {
+            alias = existingEntry[0];
+          } else {
+            alias = buildAliasFromModelId(selectedId, Object.keys(existingModels));
+            const picked = results.find((m) => m.id === selectedId);
+            providerStore.setModelId('openrouter', alias, selectedId, {
+              name: selected.label || selectedId,
+              contextLimit: picked?.contextLimit || 200000,
+              supportsThinking: true,
+              prompt: 'code-agent'
+            });
+            modelRegistry.refreshRemoteModels();
+            console.log(`${PAD}${c.green}âœ“ Added OpenRouter alias: ${alias} -> ${selectedId}${c.reset}`);
+          }
+
+          await switchModel(`openrouter:${alias}`);
+        } catch (err) {
+          console.log(`\n${PAD}${c.red}âœ— ${err.message}${c.reset}\n`);
         }
         return true;
       }
@@ -1529,6 +1918,7 @@ async function handleCommand(input) {
         config.saveConversation('autosave', conversationHistory);
       }
       watcher.stop();
+      logSessionEnd('exit', ' code=0 phase=command');
       console.log(`\n${PAD}${c.cyan}👋 See you later!${c.reset}\n`);
       process.exit(0);
 
@@ -1667,6 +2057,7 @@ async function sendMessage(message) {
 
   const FILE_LIST_CAP = 50;
   let fullMessage = `## Project Overview\n\nWorking directory: ${projectDir}\n\nFiles available (use read_file to examine if needed):\n${fileList.slice(0, FILE_LIST_CAP).join('\n')}${fileList.length > FILE_LIST_CAP ? `\n... and ${fileList.length - FILE_LIST_CAP} more (use list_files to explore)` : ''}`;
+  const hasVisionImages = pendingImages.length > 0 && modelRegistry.currentSupportsVision();
 
   // NOTE: Project instructions (RIPLEY.md) are now injected in the system prompt,
   // not here in the user message. This gives them higher priority with local models.
@@ -1676,6 +2067,9 @@ async function sendMessage(message) {
   }
 
   fullMessage += `\n\n## Request\n\n${message}${systemNote}`;
+  if (hasVisionImages) {
+    fullMessage += '\n\n## Vision Guidance\n\nUse attached image content as the primary source of truth for this request. Do not call file tools unless the user explicitly asks for repository/file analysis.';
+  }
 
   try {
     await sendAgenticMessage(fullMessage, pendingImages, message);
@@ -1757,12 +2151,18 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
       process.stdout.write(statusText);
       statusLineLength = statusText.length;
     }
+
+    // During long no-token phases, keep the pinned bar alive.
+    if (statusBar && tickCount % 10 === 0) {
+      statusBar.render();
+    }
   };
 
   // Start the status animation
   const startThinking = () => {
     process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[0]} ${thinkingMessages[0]}${c.reset}`);
     statusInterval = setInterval(updateStatus, 100);
+    if (statusBar) statusBar.render();
   };
 
   // Transition to generating mode (first token received)
@@ -1784,6 +2184,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
       clearInterval(statusInterval);
       statusInterval = null;
     }
+    if (statusBar) statusBar.render();
   };
 
   // Determine which prompt to use - mirror agentic path's model-specific logic
@@ -1815,6 +2216,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     messages.push({ role: 'system', content: fullSystemPrompt });
   }
   messages.push(...conversationHistory);
+  const streamSteeringCount = appendQueuedSteeringMessages(messages);
 
   // Handle vision: if current model supports vision and we have images, use multimodal
   if (images.length > 0 && modelRegistry.currentSupportsVision()) {
@@ -1888,6 +2290,11 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     // Check if this was an abort
     if (error.name === 'AbortError') {
       currentAbortController = null;
+      if (midTurnSteerRequested) {
+        midTurnSteerRequested = false;
+        console.log(`\n${PAD}${c.cyan}Steering update applied. Continuing...${c.reset}`);
+        return await sendStreamingMessage(message, images, rawMessage);
+      }
       return; // Don't process, user cancelled
     }
     // If streaming fails, the response might not be SSE format
@@ -1908,6 +2315,10 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
   currentAbortController = null;
 
   console.log('\n'); // Add spacing after response for readability
+
+  if (streamSteeringCount > 0) {
+    clearSteeringMessages();
+  }
 
   // Process the response
   await processAIResponse(fullResponse, message);
@@ -1932,17 +2343,24 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
   let currentStatus = 'Thinking...';
   let toolCallsDisplayed = [];
   let streamingStarted = false;
+  let spinnerTick = 0;
+  let streamedTokenCount = 0;
 
   const updateSpinner = () => {
     spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
+    spinnerTick++;
     process.stdout.clearLine(0);
     process.stdout.cursorTo(0);
     process.stdout.write(`${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${currentStatus}${c.reset}`);
+    if (statusBar && spinnerTick % 10 === 0) {
+      statusBar.render();
+    }
   };
 
   const startSpinner = () => {
     process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[0]} ${currentStatus}${c.reset}`);
     statusInterval = setInterval(updateSpinner, 100);
+    if (statusBar) statusBar.render();
   };
 
   const stopSpinner = () => {
@@ -1952,6 +2370,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       process.stdout.clearLine(0);
       process.stdout.cursorTo(0);
     }
+    if (statusBar) statusBar.render();
   };
 
   // Determine prompt - use model-specific prompt if available
@@ -1983,6 +2402,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     messages.push({ role: 'system', content: fullSystemPrompt });
   }
   messages.push(...conversationHistory);
+  const agenticSteeringCount = appendQueuedSteeringMessages(messages);
 
   if (images.length > 0 && modelRegistry.currentSupportsVision()) {
     messages.push(visionAnalyzer.buildMultimodalMessage(message, images));
@@ -2025,6 +2445,12 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           const agenticAiLabel = `${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `;
           process.stdout.write(agenticAiLabel);
           wordWrapper.currentLineLength = borderRenderer.stripAnsi(agenticAiLabel).length;
+        }
+
+        streamedTokenCount++;
+        if (statusBar) {
+          const currentOut = tokenCounter.sessionTokens?.output || 0;
+          statusBar.update({ sessionOut: currentOut + streamedTokenCount });
         }
 
         // Strip leading think blocks from stream (they arrive token by token)
@@ -2078,8 +2504,11 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     });
 
     // Update context usage from actual API token count
-    if (runner.totalTokens > 0) {
-      lastKnownTokens = runner.totalTokens;
+    if (runner.lastTurnTokens > 0) {
+      lastKnownTokens = runner.lastTurnTokens;
+    }
+    if (runner.totalPromptTokens > 0 || runner.totalCompletionTokens > 0) {
+      tokenCounter.addUsage(runner.totalPromptTokens, runner.totalCompletionTokens);
     }
 
     stopSpinner();
@@ -2094,19 +2523,31 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     }
     console.log('\n');
 
+    if (agenticSteeringCount > 0) {
+      clearSteeringMessages();
+    }
+
     if (fullResponse) {
       let cleaned = fullResponse;
       cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '');
       cleaned = cleaned.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
       cleaned = cleaned.replace(/^[\s\S]*?<\/think>\s*/i, '');
       cleaned = cleaned.replace(/^[\s\S]*?<\/thinking>\s*/i, '');
-      await processAIResponse(cleaned.trim(), rawMessage || message);
+      await processAIResponse(cleaned.trim(), rawMessage || message, {
+        skipTokenEstimate: true,
+        executeActions: false
+      });
     }
 
   } catch (error) {
     stopSpinner();
     currentAbortController = null;
     if (error.name === 'AbortError') {
+      if (midTurnSteerRequested) {
+        midTurnSteerRequested = false;
+        console.log(`\n${PAD}${c.cyan}Steering update applied. Continuing...${c.reset}`);
+        return await sendAgenticMessage(message, images, rawMessage);
+      }
       console.log(`\n\n${c.yellow}⚠ Request cancelled${c.reset}\n`);
       return;
     }
@@ -2119,10 +2560,15 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   const modeColors = { work: c.cyan, plan: c.cyan, ask: c.magenta };
   let i = 0;
+  let spinTick = 0;
   if (statusBar) statusBar.startTiming();
   const spinner = setInterval(() => {
     process.stdout.write(`\r${borderRenderer.prefix('thinking')}${modeColors[interactionMode]}${frames[i]} ${c.dim}Ripley is thinking...${c.reset}`);
     i = (i + 1) % frames.length;
+    spinTick++;
+    if (statusBar && spinTick % 10 === 0) {
+      statusBar.render();
+    }
   }, 80);
 
   try {
@@ -2153,6 +2599,7 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
       messages.push({ role: 'system', content: fullSystemPrompt });
     }
     messages.push(...conversationHistory);
+    const nonStreamSteeringCount = appendQueuedSteeringMessages(messages);
 
     // Handle vision
     if (images.length > 0 && modelRegistry.currentSupportsVision()) {
@@ -2183,6 +2630,7 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
     console.log(renderMarkdown(reply));
     console.log();
 
+    if (nonStreamSteeringCount > 0) clearSteeringMessages();
     await processAIResponse(reply, message);
 
   } catch (error) {
@@ -2192,9 +2640,13 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
   }
 }
 
-async function processAIResponse(reply, originalMessage) {
-  // Track tokens
-  tokenCounter.trackUsage(originalMessage, reply);
+async function processAIResponse(reply, originalMessage, options = {}) {
+  const executeActions = options.executeActions !== false;
+
+  // Track tokens (skip when exact API usage was already added)
+  if (!options.skipTokenEstimate) {
+    tokenCounter.trackUsage(originalMessage, reply);
+  }
 
   // Update status bar with token info
   if (statusBar) {
@@ -2254,7 +2706,11 @@ async function processAIResponse(reply, originalMessage) {
   const parsed = parseResponse(reply);
 
   // Handle file operations based on interaction mode
-  if (parsed.fileOperations.length > 0) {
+  if (!executeActions) {
+    if (parsed.fileOperations.length > 0 || parsed.commands.length > 0) {
+      console.log(`${PAD}${c.dim}(action blocks in final text ignored in agentic mode)${c.reset}\n`);
+    }
+  } else if (parsed.fileOperations.length > 0) {
     if (interactionMode === 'ask') {
       // Ask mode: Ignore file operations completely
       console.log(`${PAD}${c.dim}(${parsed.fileOperations.length} file operation(s) skipped - ASK mode)${c.reset}\n`);
@@ -2266,7 +2722,7 @@ async function processAIResponse(reply, originalMessage) {
 
   // Handle commands based on interaction mode
   let commandsExecuted = false;
-  if (parsed.commands.length > 0) {
+  if (executeActions && parsed.commands.length > 0) {
     if (interactionMode === 'ask') {
       // Ask mode: Ignore commands completely
       console.log(`${PAD}${c.dim}(${parsed.commands.length} command(s) skipped - ASK mode)${c.reset}\n`);
@@ -2493,6 +2949,8 @@ async function handleCommands(commands) {
       const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
       let frameIndex = 0;
       let spinnerInterval = null;
+      let spinnerRestartTimeout = null;
+      let commandFinished = false;
 
       const startSpinner = () => {
         if (spinnerInterval) return;
@@ -2511,6 +2969,17 @@ async function handleCommands(commands) {
         }
       };
 
+      const scheduleSpinnerRestart = () => {
+        if (spinnerRestartTimeout) {
+          clearTimeout(spinnerRestartTimeout);
+        }
+        spinnerRestartTimeout = setTimeout(() => {
+          if (!commandFinished && Date.now() - lastOutputTime > 2000) {
+            startSpinner();
+          }
+        }, 2000);
+      };
+
       try {
         const result = await commandRunner.run(cmd, {
           cwd: currentCwd,
@@ -2525,9 +2994,7 @@ async function handleCommands(commands) {
               }
             });
             // Restart spinner if no output for a while
-            setTimeout(() => {
-              if (Date.now() - lastOutputTime > 2000) startSpinner();
-            }, 2000);
+            scheduleSpinnerRestart();
           },
           onStderr: data => {
             stopSpinner();
@@ -2538,9 +3005,15 @@ async function handleCommands(commands) {
                 console.log(`${PAD}${c.cyan}│${c.reset} ${c.yellow}${line}${c.reset}`);
               }
             });
+            scheduleSpinnerRestart();
           }
         });
 
+        commandFinished = true;
+        if (spinnerRestartTimeout) {
+          clearTimeout(spinnerRestartTimeout);
+          spinnerRestartTimeout = null;
+        }
         stopSpinner();
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         console.log(`${PAD}${c.cyan}│${c.reset}`);
@@ -2550,6 +3023,11 @@ async function handleCommands(commands) {
           console.log(`${PAD}${c.cyan}└─${c.reset} ${c.red}✗ Failed (exit code ${result.code})${c.reset} ${c.dim}(${elapsed}s)${c.reset}`);
         }
       } catch (error) {
+        commandFinished = true;
+        if (spinnerRestartTimeout) {
+          clearTimeout(spinnerRestartTimeout);
+          spinnerRestartTimeout = null;
+        }
         stopSpinner();
         console.log(`${PAD}${c.cyan}└─${c.reset} ${c.red}✗ Error: ${error.message}${c.reset}`);
       }
@@ -2583,21 +3061,32 @@ function createReadlineInterface() {
     terminal: true
   });
 
+  const repromptWithStatus = () => {
+    if (statusBar) statusBar.reinstall();
+    rl.prompt(true);
+    if (statusBar) statusBar.render();
+  };
+
+  // Pre-handle Tab/Right accept so readline completer can see justAccepted first.
+  process.stdin.prependListener('keypress', (char, key) => {
+    if (!key) return;
+    if (!inlineComplete) return;
+
+    if (key.name === 'tab' && !key.shift && inlineComplete.hasGhost()) {
+      const ghost = inlineComplete.accept(true);
+      if (ghost) rl.write(ghost);
+      return;
+    }
+
+    if (key.name === 'right' && inlineComplete.hasGhost()) {
+      const ghost = inlineComplete.accept(false);
+      if (ghost) rl.write(ghost);
+    }
+  });
+
   // Handle keypress events: history, mode cycling, clipboard, escape, inline complete
   process.stdin.on('keypress', async (char, key) => {
     if (!key) return;
-
-    // --- Tab / Right arrow: accept inline ghost text ---
-    if (key.name === 'tab' && !key.shift && inlineComplete.hasGhost()) {
-      const ghost = inlineComplete.accept();
-      if (ghost) rl.write(ghost);
-      return;
-    }
-    if (key.name === 'right' && inlineComplete.hasGhost()) {
-      const ghost = inlineComplete.accept();
-      if (ghost) rl.write(ghost);
-      return;
-    }
 
     // --- Clear ghost on any other key, then re-suggest after a tick ---
     if (inlineComplete.hasGhost()) {
@@ -2643,7 +3132,7 @@ function createReadlineInterface() {
 
       process.stdout.write('\n');
       console.log(`${modeColors[interactionMode]}  ${modeIcons[interactionMode]} Mode: ${interactionMode.toUpperCase()}${c.reset} ${c.dim}- ${modeDescriptions[interactionMode]}${c.reset}`);
-      rl.prompt(true);
+      repromptWithStatus();
       return;
     }
 
@@ -2670,7 +3159,7 @@ function createReadlineInterface() {
         console.log(`${PAD}${c.red}✗ ${result.error}${c.reset}`);
       }
       console.log();
-      rl.prompt(true);
+      repromptWithStatus();
       return;
     }
 
@@ -2706,6 +3195,7 @@ function createReadlineInterface() {
 // =============================================================================
 
 async function main() {
+  initDebugLogging();
   const args = process.argv.slice(2);
 
   if (args.includes('--help') || args.includes('-h')) {
@@ -2729,11 +3219,13 @@ Examples:
   ripley "Add a dark mode toggle"
   ripley "Fix the bug in @src/api/auth.ts"
 `);
+    logSessionEnd('exit', ' code=0 phase=help');
     process.exit(0);
   }
 
   if (args.includes('--version') || args.includes('-v')) {
     console.log(`Ripley Code v${VERSION}`);
+    logSessionEnd('exit', ' code=0 phase=version');
     process.exit(0);
   }
 
@@ -2752,6 +3244,7 @@ Examples:
     } else {
       console.log(`${PAD}${c.yellow}Ripley already initialized${c.reset}`);
     }
+    logSessionEnd('exit', ' code=0 phase=init');
     process.exit(0);
   }
 
@@ -2759,8 +3252,11 @@ Examples:
   const startInYolo = args.includes('yolo') || args.includes('--yolo');
 
   // Show banner and initialize
-  showBanner();
+  await showBanner();
   initProject();
+  if (runtimeLogPath) {
+    console.log(`${PAD}${c.dim}Logs: ${runtimeLogPath}${c.reset}`);
+  }
 
   // Enable YOLO mode if started with 'yolo' argument
   if (startInYolo) {
@@ -2797,6 +3293,7 @@ Examples:
     const request = args.join(' ');
     await sendMessage(request);
     rl.close();
+    logSessionEnd('exit', ' code=0 phase=oneshot');
     process.exit(0);
   }
 
@@ -2878,6 +3375,14 @@ Examples:
       return;
     }
 
+    // Echo user input with user border prefix
+    const userLines = trimmed.split('\n');
+    const userPrefix = borderRenderer.prefix('user');
+    process.stdout.write('\n');
+    for (const line of userLines) {
+      process.stdout.write(`${userPrefix}${c.white}${line}${c.reset}\n`);
+    }
+
     // Send message to AI
     await sendMessage(trimmed);
     showPrompt();
@@ -2902,7 +3407,28 @@ Examples:
     // Only accept input when we're actually waiting for it.
     // This prevents output from commands, model switching, pickers, etc.
     // from being treated as user input.
-    if (!waitingForInput) return;
+    if (!waitingForInput) {
+      // Allow in-flight steering while a request is running.
+      if (currentAbortController) {
+        const trimmed = String(input || '').trim();
+        if (trimmed) {
+          const steerMatch = trimmed.match(/^\/steer(?:ing)?\s+(.+)$/i);
+          if (steerMatch) {
+            const steerText = steerMatch[1].trim();
+            if (steerText) {
+              if (requestMidTurnSteer(steerText)) {
+                console.log(`\n${PAD}${c.cyan}Steering received. Redirecting current turn...${c.reset}\n`);
+              } else {
+                console.log(`\n${PAD}${c.yellow}Could not apply mid-turn steering.${c.reset}\n`);
+              }
+            }
+          } else if (/^\/steer(?:ing)?$/i.test(trimmed)) {
+            console.log(`\n${PAD}${c.dim}Use /steer <text> during a running turn.${c.reset}\n`);
+          }
+        }
+      }
+      return;
+    }
 
     pasteBuffer.push(input);
 
@@ -2913,10 +3439,11 @@ Examples:
 
   const showPrompt = () => {
     waitingForInput = true;
-    if (statusBar) statusBar.render();
+    if (statusBar) statusBar.reinstall();
     const prefix = getPromptPrefix();
     rl.setPrompt(prefix);
     rl.prompt(false);
+    if (statusBar) statusBar.render();
   };
 
   // Use 'line' event instead of rl.question() to catch all pasted lines
@@ -2928,11 +3455,29 @@ Examples:
     showPrompt();
   };
 
+  // Repaint prompt + bar after terminal resize when idle.
+  let resizeRefreshTimer = null;
+  process.stdout.on('resize', () => {
+    if (resizeRefreshTimer) clearTimeout(resizeRefreshTimer);
+    resizeRefreshTimer = setTimeout(() => {
+      if (!waitingForInput) return;
+      if (currentAbortController) return;
+      showPrompt();
+    }, 30);
+  });
+
   prompt();
+  // Some terminals drop the first prompt paint; force one follow-up refresh.
+  setTimeout(() => {
+    if (!waitingForInput) return;
+    if (currentAbortController) return;
+    showPrompt();
+  }, 20);
 }
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {
+  logSessionEnd('SIGINT');
   if (statusBar) statusBar.uninstall();
   if (config && config.get('autoSaveHistory') && conversationHistory.length > 0) {
     config.saveConversation('autosave', conversationHistory);
@@ -2943,8 +3488,14 @@ process.on('SIGINT', () => {
 });
 
 main().catch(error => {
+  logSessionEnd('crash', ` error=${error.message}`);
   if (statusBar) statusBar.uninstall();
   console.error(`${c.red}Fatal error: ${error.message}${c.reset}`);
   if (watcher) watcher.stop();
   process.exit(1);
 });
+
+process.on('exit', (code) => {
+  logSessionEnd('exit', ` code=${code}`);
+});
+

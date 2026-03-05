@@ -25,7 +25,7 @@
     },
     "coder": {
       "name": "Qwen3 Coder 30B",
-      "id": "qwen/qwen3.5-9b",
+      "id": "qwen/qwen3-coder-30b",
       "vram": "~18 GB",
       "contextLimit": 32768,
       "supportsThinking": false,
@@ -45,7 +45,7 @@
     },
     "qwen35": {
       "name": "Qwen3.5 35B A3B",
-      "id": "qwen/qwen3.5-9b",
+      "id": "qwen/qwen3.5-35b-a3b",
       "vram": "21 GB",
       "contextLimit": 32768,
       "supportsThinking": true,
@@ -65,7 +65,7 @@
     },
     "glm": {
       "name": "GLM 4.7 Flash",
-      "id": "google/gemma-3-27b",
+      "id": "zai-org/glm-4.7-flash",
       "vram": "~18 GB",
       "contextLimit": 71680,
       "supportsThinking": true,
@@ -107,29 +107,9 @@
       "description": "Lightweight Qwen3.5 with vision, tool use, and reasoning. Only 6.5 GB.",
       "provider": "local"
     },
-    "gemma": {
-      "name": "Gemma 3 27B",
-      "id": "qwen/qwen3.5-9b",
-      "vram": "~17 GB",
-      "contextLimit": 32768,
-      "supportsThinking": false,
-      "prompt": "code-agent",
-      "inferenceSettings": {
-        "temperature": 0.7,
-        "topP": 0.9
-      },
-      "tags": [
-        "coding",
-        "reasoning",
-        "multimodal"
-      ],
-      "tier": "general",
-      "description": "Google's best open model. 27B dense, 128K context, multimodal.",
-      "provider": "local"
-    },
     "nemotron": {
       "name": "Nemotron 3 Nano 30B",
-      "id": "qwen/qwen3.5-9b",
+      "id": "nvidia/nemotron-3-nano",
       "vram": "19.3 GB",
       "contextLimit": 32768,
       "supportsThinking": true,
@@ -149,7 +129,7 @@
     },
     "max": {
       "name": "Qwen3 Coder Next 80B",
-      "id": "qwen/qwen3.5-9b",
+      "id": "qwen/qwen3-coder-next-80b",
       "vram": "45.2 GB",
       "contextLimit": 131072,
       "supportsThinking": false,
