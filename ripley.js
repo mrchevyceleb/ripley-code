@@ -296,6 +296,34 @@ async function checkConnection() {
     if (discovery.matched > 0) {
       console.log(`${PAD}${c.green}✓${c.reset} Models: ${discovery.matched} matched from ${discovery.total} loaded`);
     }
+
+    // Ensure only the active model is loaded (eject others, load active if needed)
+    const activeModel = modelRegistry.getCurrentModel();
+    if (activeModel?.id) {
+      try {
+        const loaded = await lmStudio.getLoadedInstances();
+        const activeLoaded = loaded.some(inst => (inst.key || inst.id || '').includes(activeModel.id));
+        // Eject any models that aren't the active one
+        for (const inst of loaded) {
+          const instId = inst.key || inst.id || '';
+          if (!instId.includes(activeModel.id)) {
+            try {
+              await lmStudio.unloadModel(inst.instanceId);
+              console.log(`${PAD}${c.dim}  Ejected ${inst.displayName || inst.key}${c.reset}`);
+            } catch {}
+          }
+        }
+        // Load active model if it wasn't already loaded
+        if (!activeLoaded) {
+          const ctxLen = activeModel.contextLimit || 32768;
+          console.log(`${PAD}${c.dim}  Loading ${activeModel.name} (ctx: ${(ctxLen / 1024).toFixed(0)}K)...${c.reset}`);
+          const result = await lmStudio.loadModel(activeModel.id, { contextLength: ctxLen });
+          console.log(`${PAD}${c.green}✓${c.reset} ${activeModel.name} loaded in ${result.load_time_seconds?.toFixed(1)}s`);
+        }
+      } catch (err) {
+        console.log(`${PAD}${c.yellow}⚠ Model sync: ${err.message}${c.reset}`);
+      }
+    }
   } else {
     console.log(`${PAD}${c.red}✗${c.reset} Cannot connect to LM Studio at ${lmStudio.baseUrl}`);
     console.log(`${PAD}${c.dim}  Make sure LM Studio is running${c.reset}\n`);
@@ -2530,7 +2558,9 @@ Examples:
 
   const showPrompt = () => {
     waitingForInput = true;
-    process.stdout.write(getPromptPrefix());
+    const prefix = getPromptPrefix();
+    rl.setPrompt(prefix);
+    rl.prompt(false);
   };
 
   // Use 'line' event instead of rl.question() to catch all pasted lines
