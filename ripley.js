@@ -285,7 +285,14 @@ function initProject() {
 
   // Vision capability
   if (modelRegistry.currentSupportsVision()) {
-    console.log(`${PAD}${c.green}✓${c.reset} Vision: local model (direct)`);
+    const visionModel = modelRegistry.getCurrentModel();
+    const visionProvider = visionModel?.provider || 'local';
+    if (visionProvider === 'local') {
+      console.log(`${PAD}${c.green}✓${c.reset} Vision: local model (direct)`);
+    } else {
+      const providerLabel = PROVIDER_LABELS[visionProvider] || visionProvider;
+      console.log(`${PAD}${c.green}✓${c.reset} Vision: ${providerLabel} model (direct)`);
+    }
   } else if (visionAnalyzer.isEnabled()) {
     console.log(`${PAD}${c.green}✓${c.reset} Vision: Gemini fallback`);
   } else {
@@ -1614,8 +1621,12 @@ async function sendMessage(message) {
     console.log(`${PAD}${c.dim}Including ${pendingImages.length} image(s)${c.reset}`);
 
     if (modelRegistry.currentSupportsVision()) {
-      // Local vision model - images will be sent directly as multimodal content
-      console.log(`${PAD}${c.green}✓ Using local vision model${c.reset}`);
+      const visionModel = modelRegistry.getCurrentModel();
+      const visionProvider = visionModel?.provider || 'local';
+      const providerLabel = visionProvider === 'local'
+        ? 'local'
+        : (PROVIDER_LABELS[visionProvider] || visionProvider);
+      console.log(`${PAD}${c.green}✓ Using ${providerLabel} vision model${c.reset}`);
     } else if (visionAnalyzer.isEnabled()) {
       // Gemini fallback - convert images to text analysis
       console.log(`${PAD}${c.cyan}🔍 Analyzing image(s) with Gemini...${c.reset}`);
