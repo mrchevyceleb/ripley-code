@@ -41,7 +41,7 @@ const PromptManager = require('./lib/promptManager');
 const ModelRegistry = require('./lib/modelRegistry');
 const { ProviderStore, PROVIDERS } = require('./lib/providerStore');
 const { ProviderManager, PROVIDER_LABELS } = require('./lib/providerManager');
-const { AgenticRunner, READ_ONLY_TOOLS, setMcpClient } = require('./lib/agenticRunner');
+const { AgenticRunner, TOOLS, READ_ONLY_TOOLS, setMcpClient } = require('./lib/agenticRunner');
 const McpClient = require('./lib/mcpClient');
 const { pick } = require('./lib/interactivePicker');
 const StatusBar = require('./lib/statusBar');
@@ -55,6 +55,8 @@ const InlineComplete = require('./lib/inlineComplete');
 const VERSION = '4.0.0';
 const PAD = '  '; // Global left padding for all output
 const DEBUG_DISABLED_VALUES = new Set(['0', 'false', 'off', 'no']);
+const NEXT_TURN_RESERVE_TOKENS = 1200;
+const COMPACTION_SAFETY_BUFFER = 0.05;
 const missingColorTokens = new Set();
 const c = new Proxy(rawColors, {
   get(target, prop) {
@@ -91,6 +93,7 @@ let statusBar = null;
 let inlineComplete = null;
 let conversationHistory = [];
 let lastKnownTokens = 0; // Track actual token usage from API responses
+let projectedContextTokens = 0; // Estimated next-request prompt tokens
 let rl = null;
 let runtimeLogPath = null;
 let sessionEndLogged = false;
@@ -736,6 +739,107 @@ function modelDisplayParts(model) {
   };
 }
 
+function resolveActivePromptMode() {
+  if (!promptManager) return activePrompt || 'base';
+
+  if (interactionMode === 'plan' && promptManager.has('plan')) {
+    return 'plan';
+  }
+
+  const modelPrompt = modelRegistry ? modelRegistry.getPrompt() : null;
+  if (modelPrompt && promptManager.has(modelPrompt)) {
+    return modelPrompt;
+  }
+
+  if (promptManager.has('code-agent')) {
+    return 'code-agent';
+  }
+
+  if (promptManager.has(activePrompt)) {
+    return activePrompt;
+  }
+
+  return 'base';
+}
+
+function buildFullSystemPrompt(promptMode = resolveActivePromptMode()) {
+  const systemPrompt = promptManager ? promptManager.get(promptMode) : '';
+  const instructions = config ? config.getInstructions() : null;
+  let fullSystemPrompt = systemPrompt || '';
+  if (instructions) {
+    fullSystemPrompt += `\n\n## Project Instructions (from ${instructions.source})\n\n${instructions.content}`;
+  }
+  return fullSystemPrompt;
+}
+
+function estimateTokensForValue(value) {
+  if (value === null || value === undefined) return 0;
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  if (!text) return 0;
+  if (tokenCounter) return tokenCounter.estimateTokens(text);
+  return Math.ceil(text.length / 4);
+}
+
+function estimatePromptTokensForMessages(messages, options = {}) {
+  const reserveTokens = Math.max(0, Number(options.reserveTokens) || 0);
+  const toolSchema = options.toolSchema || null;
+  const payload = Array.isArray(messages) ? messages : [];
+  let total = estimateTokensForValue(payload);
+  if (toolSchema) {
+    total += estimateTokensForValue(toolSchema);
+  }
+  total += reserveTokens;
+  return Math.max(0, Math.floor(total));
+}
+
+function contextPercentForTokens(tokens, contextLimit = modelRegistry?.getContextLimit?.() || 0) {
+  const limit = Number(contextLimit) || 0;
+  if (limit <= 0) return 0;
+  return Math.min(100, Math.round((Math.max(0, Number(tokens) || 0) / limit) * 100));
+}
+
+function setContextEstimate(tokens, options = {}) {
+  const normalized = Math.max(0, Math.floor(Number(tokens) || 0));
+  projectedContextTokens = normalized;
+  if (options.persistActual) {
+    lastKnownTokens = normalized;
+  }
+
+  if (statusBar && modelRegistry) {
+    const limit = modelRegistry.getContextLimit();
+    statusBar.update({
+      contextTokens: normalized,
+      contextPct: contextPercentForTokens(normalized, limit),
+      contextLimit: limit
+    });
+  }
+}
+
+function estimateNextTurnContextTokens() {
+  if (!modelRegistry || !promptManager) return Math.max(projectedContextTokens, lastKnownTokens);
+
+  const promptMode = resolveActivePromptMode();
+  const fullSystemPrompt = buildFullSystemPrompt(promptMode);
+  const messages = [];
+  if (fullSystemPrompt) {
+    messages.push({ role: 'system', content: fullSystemPrompt });
+  }
+  messages.push(...conversationHistory);
+
+  const toolSchema = interactionMode === 'plan' ? READ_ONLY_TOOLS : TOOLS;
+  return estimatePromptTokensForMessages(messages, {
+    toolSchema,
+    reserveTokens: NEXT_TURN_RESERVE_TOKENS
+  });
+}
+
+function refreshIdleContextEstimate() {
+  const estimated = estimateNextTurnContextTokens();
+  if (estimated > 0) {
+    setContextEstimate(estimated);
+  }
+}
+
 function tokenizeSearchQuery(query) {
   return String(query || '')
     .toLowerCase()
@@ -891,6 +995,7 @@ async function switchModel(modelKey, options = {}) {
   modelRegistry.setCurrent(modelKey);
   config.set('activeModel', modelKey);
   lastKnownTokens = 0;
+  projectedContextTokens = 0;
   const switched = modelRegistry.getCurrentModel();
   const parts = modelDisplayParts(switched);
 
@@ -905,6 +1010,7 @@ async function switchModel(modelKey, options = {}) {
       contextLimit: switched.contextLimit || modelRegistry.getContextLimit()
     });
   }
+  refreshIdleContextEstimate();
 
   const autoPrompt = modelRegistry.getPrompt();
   if (promptManager.has(autoPrompt) && !silent) {
@@ -1254,6 +1360,7 @@ async function handleCommand(input) {
     case '/clear':
       conversationHistory = [];
       lastKnownTokens = 0;
+      projectedContextTokens = 0;
       contextBuilder.clearFiles();
       contextBuilder.loadPriorityFiles();
       tokenCounter.resetSession();
@@ -1262,13 +1369,16 @@ async function handleCommand(input) {
         statusBar.update({ contextPct: 0, contextTokens: 0, sessionIn: 0, sessionOut: 0 });
         statusBar.reinstall();
       }
+      refreshIdleContextEstimate();
       console.log(`\n${PAD}${c.green}  ✓ Cleared conversation and reset context${c.reset}\n`);
       return true;
 
     case '/clearhistory':
       conversationHistory = [];
       lastKnownTokens = 0;
+      projectedContextTokens = 0;
       tokenCounter.resetSession();
+      refreshIdleContextEstimate();
       console.log(`\n${PAD}${c.green}  ✓ Cleared conversation history${c.reset}\n`);
       return true;
 
@@ -2234,6 +2344,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
   } else {
     messages.push({ role: 'user', content: message });
   }
+  setContextEstimate(estimatePromptTokensForMessages(messages, { reserveTokens: 64 }));
 
   // Create abort controller for this request
   currentAbortController = new AbortController();
@@ -2419,6 +2530,11 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
   } else {
     messages.push({ role: 'user', content: message });
   }
+  const toolSchema = interactionMode === 'plan' ? READ_ONLY_TOOLS : TOOLS;
+  setContextEstimate(estimatePromptTokensForMessages(messages, {
+    toolSchema,
+    reserveTokens: 64
+  }));
 
   startSpinner();
   if (statusBar) statusBar.startTiming();
@@ -2515,7 +2631,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
 
     // Update context usage from actual API token count
     if (runner.lastTurnTokens > 0) {
-      lastKnownTokens = runner.lastTurnTokens;
+      setContextEstimate(runner.lastTurnTokens, { persistActual: true });
     }
     if (runner.totalPromptTokens > 0 || runner.totalCompletionTokens > 0) {
       tokenCounter.addUsage(runner.totalPromptTokens, runner.totalCompletionTokens);
@@ -2527,8 +2643,8 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       statusBar.update({
         sessionIn: tokenCounter.sessionTokens?.input || 0,
         sessionOut: tokenCounter.sessionTokens?.output || 0,
-        contextTokens: lastKnownTokens,
-        contextPct: Math.round((lastKnownTokens / modelRegistry.getContextLimit()) * 100)
+        contextTokens: projectedContextTokens,
+        contextPct: contextPercentForTokens(projectedContextTokens, modelRegistry.getContextLimit())
       });
     }
     console.log('\n');
@@ -2617,6 +2733,7 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
     } else {
       messages.push({ role: 'user', content: message });
     }
+    setContextEstimate(estimatePromptTokensForMessages(messages, { reserveTokens: 64 }));
 
     const compactInferenceSettings = modelRegistry.getInferenceSettings();
     const activeClient = await getActiveClient();
@@ -2628,6 +2745,11 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
       repeatPenalty: compactInferenceSettings.repeatPenalty,
       reasoningEffort: compactModelMeta?.reasoningEffort
     });
+    const usage = data.usage || {};
+    const promptTokens = Number(usage.prompt_tokens ?? usage.input_tokens ?? 0);
+    if (promptTokens > 0) {
+      setContextEstimate(promptTokens, { persistActual: true });
+    }
 
     clearInterval(spinner);
     process.stdout.write('\r' + ' '.repeat(50) + '\r');
@@ -2753,12 +2875,15 @@ async function processAIResponse(reply, originalMessage, options = {}) {
   conversationHistory.push({ role: 'user', content: originalMessage });
   conversationHistory.push({ role: 'assistant', content: reply });
 
-  // Auto-compact if context usage hits 80%+
+  // Project next-turn prompt usage and compact before we hit hard limits.
+  const projectedNextTokens = estimateNextTurnContextTokens();
+  setContextEstimate(projectedNextTokens);
   const ctxLimit = modelRegistry.getContextLimit();
-  const usedTokens = lastKnownTokens > 0
-    ? lastKnownTokens
-    : tokenCounter.estimateTokens(conversationHistory.map(m => m.content || '').join(' '));
-  if (usedTokens / ctxLimit >= 0.80) {
+  const compactThreshold = Math.max(
+    0.5,
+    (config.get('tokenWarningThreshold') || 0.8) - COMPACTION_SAFETY_BUFFER
+  );
+  if (projectedNextTokens / ctxLimit >= compactThreshold) {
     await compactHistory();
   } else {
     // Trim history if too long (safety fallback)
@@ -2767,6 +2892,7 @@ async function processAIResponse(reply, originalMessage, options = {}) {
       conversationHistory = conversationHistory.slice(-historyLimit);
     }
   }
+  refreshIdleContextEstimate();
 
 }
 
@@ -3298,6 +3424,7 @@ Examples:
       contextLimit: modelRegistry.getContextLimit(),
       mcpConnected: mcpIsConnected
     });
+    refreshIdleContextEstimate();
   }
 
   console.log(`\n${PAD}${c.dim}Type ${c.yellow}/help${c.reset}${c.dim} for commands • ${c.yellow}@file${c.reset}${c.dim} to add files • ${c.yellow}/exit${c.reset}${c.dim} to quit${c.reset}\n`);
@@ -3318,17 +3445,11 @@ Examples:
 
   // Interactive mode
   const getContextPercent = () => {
-    // Use actual token count from last API response when available
     const limit = modelRegistry.getContextLimit();
-    let usedTokens;
-    if (lastKnownTokens > 0) {
-      usedTokens = lastKnownTokens;
-    } else {
-      // Fallback: estimate from conversation history
-      const historyText = conversationHistory.map(m => m.content || '').join(' ');
-      usedTokens = tokenCounter.estimateTokens(historyText);
-    }
-    const pct = Math.min(100, Math.round((usedTokens / limit) * 100));
+    const usedTokens = projectedContextTokens > 0
+      ? projectedContextTokens
+      : estimateNextTurnContextTokens();
+    const pct = contextPercentForTokens(usedTokens, limit);
 
     // Color code: green < 50%, yellow 50-79%, red 80%+
     let color = c.green;
@@ -3492,6 +3613,7 @@ Examples:
 
   const showPrompt = () => {
     waitingForInput = true;
+    refreshIdleContextEstimate();
     if (statusBar) statusBar.reinstall();
     const prefix = getPromptPrefix();
     rl.setPrompt(prefix);
