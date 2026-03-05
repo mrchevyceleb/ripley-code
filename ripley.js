@@ -44,6 +44,7 @@ const McpClient = require('./lib/mcpClient');
 const { pick } = require('./lib/interactivePicker');
 const StatusBar = require('./lib/statusBar');
 const borderRenderer = require('./lib/borderRenderer');
+const InlineComplete = require('./lib/inlineComplete');
 
 // =============================================================================
 // CONFIGURATION
@@ -72,6 +73,7 @@ let promptManager = null;
 let modelRegistry = null;
 let mcpClient = null;
 let statusBar = null;
+let inlineComplete = null;
 let conversationHistory = [];
 let lastKnownTokens = 0; // Track actual token usage from API responses
 let rl = null;
@@ -187,6 +189,9 @@ function initProject() {
   commandRunner = new CommandRunner(projectDir);
   historyManager = new HistoryManager(path.join(projectDir, '.ripley'));
   completer = new Completer(projectDir, contextBuilder);
+  inlineComplete = new InlineComplete();
+  inlineComplete.projectDir = projectDir;
+  inlineComplete.setCommands(completer.commands);
   tokenCounter = new TokenCounter(config);
   imageHandler = new ImageHandler(projectDir);
 
@@ -2260,10 +2265,34 @@ function createReadlineInterface() {
     terminal: true
   });
 
-  // Handle keypress events: history, mode cycling, clipboard, escape
-  // NOTE: Tab completion is handled by readline's built-in completer (not here)
+  // Handle keypress events: history, mode cycling, clipboard, escape, inline complete
   process.stdin.on('keypress', async (char, key) => {
     if (!key) return;
+
+    // --- Tab / Right arrow: accept inline ghost text ---
+    if (key.name === 'tab' && !key.shift && inlineComplete.hasGhost()) {
+      const ghost = inlineComplete.accept();
+      if (ghost) rl.write(ghost);
+      return;
+    }
+    if (key.name === 'right' && inlineComplete.hasGhost()) {
+      const ghost = inlineComplete.accept();
+      if (ghost) rl.write(ghost);
+      return;
+    }
+
+    // --- Clear ghost on any other key, then re-suggest after a tick ---
+    if (inlineComplete.hasGhost()) {
+      inlineComplete.clearGhost();
+    }
+    // Schedule ghost suggestion for after readline processes this key
+    if (key.name !== 'return' && key.name !== 'escape' && !key.ctrl) {
+      setImmediate(() => {
+        if (!rl.line) return;
+        const ghost = inlineComplete.suggest(rl.line);
+        if (ghost) inlineComplete.renderGhost(ghost);
+      });
+    }
 
     // --- History navigation ---
     if (key.name === 'up') {
