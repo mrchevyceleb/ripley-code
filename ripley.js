@@ -34,7 +34,7 @@ const ImageHandler = require('./lib/imageHandler');
 const VisionAnalyzer = require('./lib/visionAnalyzer');
 const { StreamHandler } = require('./lib/streamHandler');
 const { parseResponse } = require('./lib/parser');
-const { formatOperationsBatch, formatCompactSummary, colors: c } = require('./lib/diffViewer');
+const { formatOperationsBatch, formatCompactSummary, colors: rawColors } = require('./lib/diffViewer');
 const { MarkdownRenderer } = require('./lib/markdownRenderer');
 const LmStudio = require('./lib/lmStudio');
 const PromptManager = require('./lib/promptManager');
@@ -55,6 +55,16 @@ const InlineComplete = require('./lib/inlineComplete');
 const VERSION = '4.0.0';
 const PAD = '  '; // Global left padding for all output
 const DEBUG_DISABLED_VALUES = new Set(['0', 'false', 'off', 'no']);
+const missingColorTokens = new Set();
+const c = new Proxy(rawColors, {
+  get(target, prop) {
+    if (typeof prop !== 'string') return target[prop];
+    if (Object.prototype.hasOwnProperty.call(target, prop)) return target[prop];
+    // Guard against "undefined" leaking into terminal output.
+    missingColorTokens.add(prop);
+    return '';
+  }
+});
 
 // =============================================================================
 // GLOBALS
@@ -3196,7 +3206,9 @@ function createReadlineInterface() {
 
 async function main() {
   initDebugLogging();
-  const args = process.argv.slice(2);
+  const rawArgs = process.argv.slice(2);
+  const disableStatusBar = rawArgs.includes('--no-status-bar');
+  const args = rawArgs.filter(arg => arg !== '--no-status-bar');
 
   if (args.includes('--help') || args.includes('-h')) {
     console.log(`
@@ -3212,6 +3224,7 @@ Options:
   --help, -h          Show this help
   --version, -v       Show version
   --yolo              Start in YOLO mode
+  --no-status-bar     Disable the pinned status bar (fallback UI mode)
 
 Examples:
   ripley
@@ -3257,6 +3270,9 @@ Examples:
   if (runtimeLogPath) {
     console.log(`${PAD}${c.dim}Logs: ${runtimeLogPath}${c.reset}`);
   }
+  if (disableStatusBar) {
+    console.log(`${PAD}${c.dim}Status bar disabled (${c.white}--no-status-bar${c.dim})${c.reset}`);
+  }
 
   // Enable YOLO mode if started with 'yolo' argument
   if (startInYolo) {
@@ -3269,23 +3285,26 @@ Examples:
     console.log(`${PAD}${c.yellow}⚠ Starting in setup mode.${c.reset} ${c.dim}Use /connect or /model to switch providers/models.${c.reset}\n`);
   }
 
-  // Prepare status bar (but don't install yet - readline resets scroll region)
-  statusBar = new StatusBar();
-  const mcpIsConnected = await mcpClient.isConnected();
-  const initialModel = modelRegistry.getCurrentModel();
-  const initialParts = modelDisplayParts(initialModel);
-  statusBar.update({
-    modelName: `${initialParts.providerLabel}: ${initialModel?.name || '?'}`,
-    modelId: modelRegistry.getCurrentId() || '',
-    contextLimit: modelRegistry.getContextLimit(),
-    mcpConnected: mcpIsConnected
-  });
+  const enableStatusBar = Boolean(process.stdout.isTTY) && !disableStatusBar;
+  if (enableStatusBar) {
+    // Prepare status bar (but don't install yet - readline resets scroll region)
+    statusBar = new StatusBar();
+    const mcpIsConnected = await mcpClient.isConnected();
+    const initialModel = modelRegistry.getCurrentModel();
+    const initialParts = modelDisplayParts(initialModel);
+    statusBar.update({
+      modelName: `${initialParts.providerLabel}: ${initialModel?.name || '?'}`,
+      modelId: modelRegistry.getCurrentId() || '',
+      contextLimit: modelRegistry.getContextLimit(),
+      mcpConnected: mcpIsConnected
+    });
+  }
 
   console.log(`\n${PAD}${c.dim}Type ${c.yellow}/help${c.reset}${c.dim} for commands • ${c.yellow}@file${c.reset}${c.dim} to add files • ${c.yellow}/exit${c.reset}${c.dim} to quit${c.reset}\n`);
 
   // Create readline first, THEN install status bar (readline resets terminal state)
   rl = createReadlineInterface();
-  statusBar.install();
+  if (statusBar) statusBar.install();
 
   // Handle one-shot mode (but not for special commands like init, yolo)
   const specialArgs = ['init', 'yolo', '--yolo'];
@@ -3335,6 +3354,40 @@ Examples:
     const ctxPct = getContextPercent();
     const thinkIndicator = (thinkingMode && modelRegistry.currentSupportsThinking()) ? ` ${c.cyan}🧠${c.reset}` : '';
     return `${borderRenderer.prefix('user')}${modeIndicators[interactionMode]} ${c.dim}[${modelName}]${c.reset}${thinkIndicator} ${c.dim}ctx:${c.reset}${ctxPct} ${c.orange}You → ${c.reset}`;
+  };
+
+  const runStartupUiSelfCheck = () => {
+    if (!process.stdout.isTTY) return;
+    const cols = process.stdout.columns || 0;
+    const rows = process.stdout.rows || 0;
+    const warnings = [];
+
+    if (rows > 0 && rows < 10) warnings.push(`terminal height is tight (${rows} rows)`);
+    if (cols > 0 && cols < 60) warnings.push(`terminal width is tight (${cols} cols)`);
+
+    const promptWidth = borderRenderer.stripAnsi(getPromptPrefix()).length;
+    if (cols > 0 && promptWidth >= Math.max(1, cols - 2)) {
+      warnings.push(`prompt prefix is too wide (${promptWidth}/${cols})`);
+    }
+
+    if (statusBar && rows > 0 && rows < 8) {
+      warnings.push(`status bar has limited room (${rows} rows total)`);
+    }
+
+    if (missingColorTokens.size > 0) {
+      warnings.push(`unknown color token(s): ${Array.from(missingColorTokens).join(', ')}`);
+    }
+
+    if (warnings.length === 0) {
+      appendDebugLog(`[ui-check] ok rows=${rows} cols=${cols} statusBar=${statusBar ? 'on' : 'off'}\n`);
+      return;
+    }
+
+    console.log(`${PAD}${c.yellow}âš  UI self-check warning(s): ${warnings.join('; ')}${c.reset}`);
+    if (statusBar) {
+      console.log(`${PAD}${c.dim}Tip: relaunch with --no-status-bar if this terminal still glitches.${c.reset}`);
+    }
+    appendDebugLog(`[ui-check] warn rows=${rows} cols=${cols} statusBar=${statusBar ? 'on' : 'off'} ${warnings.join(' | ')}\n`);
   };
 
   // Paste detection: buffer rapid lines and combine them into one message.
@@ -3466,6 +3519,7 @@ Examples:
     }, 30);
   });
 
+  runStartupUiSelfCheck();
   prompt();
   // Some terminals drop the first prompt paint; force one follow-up refresh.
   setTimeout(() => {
