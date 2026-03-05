@@ -2455,7 +2455,7 @@ Examples:
     process.exit(1);
   }
 
-  // Install persistent status bar
+  // Prepare status bar (but don't install yet - readline resets scroll region)
   statusBar = new StatusBar();
   const mcpIsConnected = await mcpClient.isConnected();
   statusBar.update({
@@ -2464,12 +2464,12 @@ Examples:
     contextLimit: modelRegistry.getContextLimit(),
     mcpConnected: mcpIsConnected
   });
-  statusBar.install();
 
   console.log(`\n${PAD}${c.dim}Type ${c.yellow}/help${c.reset}${c.dim} for commands • ${c.yellow}@file${c.reset}${c.dim} to add files • ${c.yellow}/exit${c.reset}${c.dim} to quit${c.reset}\n`);
 
-  // Create readline with history support
+  // Create readline first, THEN install status bar (readline resets terminal state)
   rl = createReadlineInterface();
+  statusBar.install();
 
   // Handle one-shot mode (but not for special commands like init, yolo)
   const specialArgs = ['init', 'yolo', '--yolo'];
@@ -2587,6 +2587,7 @@ Examples:
 
   const showPrompt = () => {
     waitingForInput = true;
+    if (statusBar) statusBar.render();
     const prefix = getPromptPrefix();
     rl.setPrompt(prefix);
     rl.prompt(false);
