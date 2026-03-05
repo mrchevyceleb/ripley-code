@@ -4,7 +4,7 @@
   "description": "Ripley Code - Local AI coding agent. Direct to LM Studio with model switching.",
   "main": "ripley.js",
   "bin": {
-    "ripley": "./ripley.js"
+    "ripley": "ripley.js"
   },
   "scripts": {
     "start": "node ripley.js",

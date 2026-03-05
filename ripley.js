@@ -868,9 +868,15 @@ async function handleCommand(input) {
       return true;
 
     case '/compact':
-      const newCompact = !config.get('compactMode');
-      config.set('compactMode', newCompact);
-      console.log(`\n${PAD}${c.green}  ✓ Compact mode: ${newCompact ? 'ON' : 'OFF'}${c.reset}\n`);
+      if (conversationHistory.length < 4) {
+        console.log(`\n${PAD}${c.yellow}Not enough conversation to compact${c.reset}\n`);
+      } else {
+        await compactHistory();
+      }
+      // Also enable auto-compact mode
+      if (!config.get('compactMode')) {
+        config.set('compactMode', true);
+      }
       return true;
 
     case '/stream':
@@ -1459,7 +1465,10 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     // Clear the thinking line and show AI label on same line
     process.stdout.clearLine(0);
     process.stdout.cursorTo(0);
-    process.stdout.write(`${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `);
+    const aiLabel = `${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `;
+    process.stdout.write(aiLabel);
+    // Tell word wrapper how much of the first line is already used
+    wordWrapper.currentLineLength = borderRenderer.stripAnsi(aiLabel).length;
   };
 
   const stopStatus = () => {
@@ -1629,9 +1638,9 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     if (statusInterval) {
       clearInterval(statusInterval);
       statusInterval = null;
+      process.stdout.clearLine(0);
+      process.stdout.cursorTo(0);
     }
-    process.stdout.clearLine(0);
-    process.stdout.cursorTo(0);
   };
 
   // Determine prompt - use model-specific prompt if available
@@ -1701,7 +1710,9 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
             console.log(`${borderRenderer.prefix('tool')}${c.dim}└─${c.reset}`);
           }
 
-          process.stdout.write(`${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `);
+          const agenticAiLabel = `${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `;
+          process.stdout.write(agenticAiLabel);
+          wordWrapper.currentLineLength = borderRenderer.stripAnsi(agenticAiLabel).length;
         }
 
         // Strip leading think blocks from stream (they arrive token by token)

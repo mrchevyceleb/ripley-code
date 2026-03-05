@@ -64,7 +64,7 @@
       "name": "GLM 4.7 Flash",
       "id": "zai-org/glm-4.7-flash",
       "vram": "~18 GB",
-      "contextLimit": 32768,
+      "contextLimit": 71680,
       "supportsThinking": true,
       "prompt": "code-agent-glm",
       "inferenceSettings": {
