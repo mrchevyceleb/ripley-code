@@ -20,17 +20,13 @@ A powerful local AI coding agent that runs on your own hardware. Direct connecti
 ## Installation
 
 ```bash
-git clone https://github.com/mrchevyceleb/ripley-code.git
-cd ripley-code
-npm install -g .
+npm install -g git+https://github.com/mrchevyceleb/ripley-code.git
 ```
 
 ### Upgrade
 
 ```bash
-cd ripley-code
-git pull
-npm install -g .
+npm install -g git+https://github.com/mrchevyceleb/ripley-code.git
 ```
 
 ## Usage
