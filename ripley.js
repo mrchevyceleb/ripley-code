@@ -3,7 +3,7 @@
 /**
  * Ripley Code v4.0.0 - Your local AI coding agent
  *
- * Direct to LM Studio - no middleware needed.
+ * Local + remote providers with direct model connections.
  *
  * Features:
  * - Named model profiles with /model switching
@@ -39,7 +39,9 @@ const { MarkdownRenderer } = require('./lib/markdownRenderer');
 const LmStudio = require('./lib/lmStudio');
 const PromptManager = require('./lib/promptManager');
 const ModelRegistry = require('./lib/modelRegistry');
-const { AgenticRunner, setMcpClient } = require('./lib/agenticRunner');
+const { ProviderStore, PROVIDERS } = require('./lib/providerStore');
+const { ProviderManager, PROVIDER_LABELS } = require('./lib/providerManager');
+const { AgenticRunner, READ_ONLY_TOOLS, setMcpClient } = require('./lib/agenticRunner');
 const McpClient = require('./lib/mcpClient');
 const { pick } = require('./lib/interactivePicker');
 const StatusBar = require('./lib/statusBar');
@@ -71,6 +73,8 @@ let visionAnalyzer = null;
 let lmStudio = null;
 let promptManager = null;
 let modelRegistry = null;
+let providerStore = null;
+let providerManager = null;
 let mcpClient = null;
 let statusBar = null;
 let inlineComplete = null;
@@ -78,8 +82,8 @@ let conversationHistory = [];
 let lastKnownTokens = 0; // Track actual token usage from API responses
 let rl = null;
 
-// Interaction modes: 'code' (default), 'plan' (preview only), 'ask' (no operations)
-let interactionMode = 'code';
+// Interaction modes: 'work' (default), 'plan' (explore + structured plan), 'ask' (no operations)
+let interactionMode = 'work';
 
 // Active prompt name (default: 'base', user can switch with /prompt)
 let activePrompt = 'base';
@@ -106,7 +110,7 @@ ${PAD}██║  ██║██║██║     ███████╗██�
 ${PAD}╚═╝  ╚═╝╚═╝╚═╝     ╚══════╝╚══════╝   ╚═╝
 ${c.reset}
 ${PAD}${c.cyan}═══════════════════════════════════════════${c.reset}
-${PAD}${c.dim}Ripley Code • v${VERSION} • Direct to LM Studio${c.reset}
+${PAD}${c.dim}Ripley Code • v${VERSION} • Local + Remote Models${c.reset}
 ${PAD}${c.cyan}═══════════════════════════════════════════${c.reset}
 `);
 }
@@ -140,13 +144,15 @@ ${P}${c.yellow}/compact${c.reset}            Toggle compact mode
 ${P}${c.yellow}/think${c.reset}              Toggle thinking mode (gpt-oss reasons before answering)
 
 ${P}${c.orange}${c.dim}Modes:${c.reset}
-${P}${c.yellow}/plan${c.reset}               Toggle PLAN mode (creates plan, no code)
-${P}${c.yellow}/implement${c.reset}          Execute the saved plan
+${P}${c.yellow}/work${c.reset}               Switch to WORK mode (execute operations)
+${P}${c.yellow}/plan${c.reset}               Toggle PLAN mode (explore + structured plan + review)
+${P}${c.yellow}/implement${c.reset}          Execute the saved plan from .ripley/plan.md
 ${P}${c.yellow}/ask${c.reset}                Toggle ASK mode (questions only, no file ops)
 ${P}${c.yellow}/mode${c.reset}               Show current mode
 ${P}${c.yellow}/yolo${c.reset}               Toggle YOLO mode (auto-apply all changes)
 ${P}${c.yellow}/agent${c.reset}              Show agentic mode info (always on)
 ${P}${c.yellow}/model [name]${c.reset}      Show/switch model (nemotron, coder, max, vision...)
+${P}${c.yellow}/connect [provider]${c.reset} Connect provider (Anthropic, OpenAI OAuth, OpenRouter)
 ${P}${c.yellow}/prompt [name]${c.reset}     Show/switch prompt (base, code-agent, or any .md)
 
 ${P}${c.orange}${c.dim}Config Commands:${c.reset}
@@ -170,7 +176,7 @@ ${P}${c.orange}${c.dim}Tips:${c.reset}
 ${P}${c.gray}• Use ${c.cyan}@filename${c.gray} in messages to auto-load files
 ${P}${c.gray}• Press ${c.cyan}↑${c.gray}/${c.cyan}↓${c.gray} to navigate command history
 ${P}${c.gray}• Press ${c.cyan}Tab${c.gray} for completion
-${P}${c.gray}• Press ${c.cyan}Shift+Tab${c.gray} to cycle modes (code → plan → ask)
+${P}${c.gray}• Press ${c.cyan}Shift+Tab${c.gray} to cycle modes (work → plan → ask)
 ${P}${c.gray}• Press ${c.cyan}Alt+V${c.gray} to paste screenshot from clipboard
 ${P}${c.gray}• Press ${c.cyan}Esc Esc${c.gray} to cancel current request
 ${P}${c.gray}• Create ${c.cyan}RIPLEY.md${c.gray} in your project root for project-specific AI instructions
@@ -195,17 +201,19 @@ function initProject() {
   tokenCounter = new TokenCounter(config);
   imageHandler = new ImageHandler(projectDir);
 
-  // Initialize LM Studio client
+  // Initialize LM Studio + provider manager
   const lmStudioUrl = config.get('lmStudioUrl') || 'http://localhost:1234';
   lmStudio = new LmStudio({ baseUrl: lmStudioUrl });
+  providerStore = new ProviderStore();
+  providerManager = new ProviderManager({ lmStudio, store: providerStore });
 
   // Initialize prompt manager (loads .md files from prompts/ directory)
   const promptsDir = path.join(__dirname, 'prompts');
   promptManager = new PromptManager(promptsDir);
 
-  // Initialize model registry
+  // Initialize model registry (local + connected remote models)
   const modelsPath = path.join(__dirname, 'models.json');
-  modelRegistry = new ModelRegistry(modelsPath, lmStudio);
+  modelRegistry = new ModelRegistry(modelsPath, lmStudio, providerStore);
 
   // Restore last active model from config
   const savedModel = config.get('activeModel');
@@ -268,7 +276,8 @@ function initProject() {
   // Show model info
   const currentModel = modelRegistry.getCurrentModel();
   if (currentModel) {
-    console.log(`${PAD}${c.green}✓${c.reset} Model: ${c.white}${currentModel.name}${c.reset} ${c.dim}(${currentModel.key})${c.reset}`);
+    const providerLabel = PROVIDER_LABELS[currentModel.provider || 'local'] || currentModel.provider || 'local';
+    console.log(`${PAD}${c.green}✓${c.reset} Model: ${c.white}${currentModel.name}${c.reset} ${c.dim}(${currentModel.key}, ${providerLabel})${c.reset}`);
   }
 
   // Show prompt info
@@ -280,7 +289,7 @@ function initProject() {
   } else if (visionAnalyzer.isEnabled()) {
     console.log(`${PAD}${c.green}✓${c.reset} Vision: Gemini fallback`);
   } else {
-    console.log(`${PAD}${c.dim}○ Vision disabled (no vision model or GEMINI_API_KEY)${c.reset}`);
+    console.log(`${PAD}${c.dim}○ Vision disabled (use /set geminiApiKey <key> or load a vision model)${c.reset}`);
   }
 
   // Initialize MCP client
@@ -291,51 +300,88 @@ function initProject() {
   console.log(`${PAD}${c.cyan}✓${c.reset} Mode: always agentic ${c.dim}(reads files on demand, streams final response)${c.reset}`);
 }
 
-async function checkConnection() {
-  const connected = await lmStudio.isConnected();
-  if (connected) {
-    console.log(`${PAD}${c.green}✓${c.reset} LM Studio: Connected (${lmStudio.baseUrl})`);
+function activeProviderKey() {
+  return modelRegistry.getCurrentProvider() || 'local';
+}
 
-    // Auto-discover model IDs
+function currentModelLabel() {
+  const model = modelRegistry.getCurrentModel();
+  if (!model) return '?';
+  return `${model.name} (${model.key})`;
+}
+
+async function getActiveClient() {
+  const model = modelRegistry.getCurrentModel();
+  if (!model) throw new Error('No active model selected');
+  return await providerManager.getClientForModel(model);
+}
+
+async function syncLocalModelToLmStudio(activeModel) {
+  if (!activeModel || (activeModel.provider || 'local') !== 'local' || !activeModel.id) return;
+  try {
+    const loaded = await lmStudio.getLoadedInstances();
+    const activeLoaded = loaded.some(inst => (inst.key || inst.id || '').includes(activeModel.id));
+    for (const inst of loaded) {
+      const instId = inst.key || inst.id || '';
+      if (!instId.includes(activeModel.id)) {
+        try {
+          await lmStudio.unloadModel(inst.instanceId);
+          console.log(`${PAD}${c.dim}  Ejected ${inst.displayName || inst.key}${c.reset}`);
+        } catch {}
+      }
+    }
+    if (!activeLoaded) {
+      const ctxLen = activeModel.contextLimit || 32768;
+      console.log(`${PAD}${c.dim}  Loading ${activeModel.name} (ctx: ${(ctxLen / 1024).toFixed(0)}K)...${c.reset}`);
+      const result = await lmStudio.loadModel(activeModel.id, { contextLength: ctxLen });
+      console.log(`${PAD}${c.green}✓${c.reset} ${activeModel.name} loaded in ${result.load_time_seconds?.toFixed(1)}s`);
+    }
+  } catch (err) {
+    console.log(`${PAD}${c.yellow}⚠ Model sync: ${err.message}${c.reset}`);
+  }
+}
+
+async function checkConnection() {
+  modelRegistry.refreshRemoteModels();
+  const activeProvider = activeProviderKey();
+  const activeModel = modelRegistry.getCurrentModel();
+
+  const lmConnected = await lmStudio.isConnected();
+  if (lmConnected) {
+    console.log(`${PAD}${c.green}✓${c.reset} LM Studio: Connected (${lmStudio.baseUrl})`);
     const discovery = await modelRegistry.discover();
     if (discovery.matched > 0) {
       console.log(`${PAD}${c.green}✓${c.reset} Models: ${discovery.matched} matched from ${discovery.total} loaded`);
     }
-
-    // Ensure only the active model is loaded (eject others, load active if needed)
-    const activeModel = modelRegistry.getCurrentModel();
-    if (activeModel?.id) {
-      try {
-        const loaded = await lmStudio.getLoadedInstances();
-        const activeLoaded = loaded.some(inst => (inst.key || inst.id || '').includes(activeModel.id));
-        // Eject any models that aren't the active one
-        for (const inst of loaded) {
-          const instId = inst.key || inst.id || '';
-          if (!instId.includes(activeModel.id)) {
-            try {
-              await lmStudio.unloadModel(inst.instanceId);
-              console.log(`${PAD}${c.dim}  Ejected ${inst.displayName || inst.key}${c.reset}`);
-            } catch {}
-          }
-        }
-        // Load active model if it wasn't already loaded
-        if (!activeLoaded) {
-          const ctxLen = activeModel.contextLimit || 32768;
-          console.log(`${PAD}${c.dim}  Loading ${activeModel.name} (ctx: ${(ctxLen / 1024).toFixed(0)}K)...${c.reset}`);
-          const result = await lmStudio.loadModel(activeModel.id, { contextLength: ctxLen });
-          console.log(`${PAD}${c.green}✓${c.reset} ${activeModel.name} loaded in ${result.load_time_seconds?.toFixed(1)}s`);
-        }
-      } catch (err) {
-        console.log(`${PAD}${c.yellow}⚠ Model sync: ${err.message}${c.reset}`);
-      }
+    if (activeProvider === 'local') {
+      await syncLocalModelToLmStudio(activeModel);
     }
   } else {
-    console.log(`${PAD}${c.red}✗${c.reset} Cannot connect to LM Studio at ${lmStudio.baseUrl}`);
-    console.log(`${PAD}${c.dim}  Make sure LM Studio is running${c.reset}\n`);
-    return false;
+    const prefix = activeProvider === 'local' ? c.red : c.yellow;
+    const mark = activeProvider === 'local' ? '✗' : '○';
+    console.log(`${PAD}${prefix}${mark}${c.reset} LM Studio: Not connected (${lmStudio.baseUrl})`);
+    if (activeProvider === 'local') {
+      console.log(`${PAD}${c.dim}  Active model is local. Start LM Studio or switch to a connected remote model.${c.reset}\n`);
+      return false;
+    }
   }
 
-  // Check MCP server connection
+  if (activeProvider !== 'local') {
+    try {
+      const client = await getActiveClient();
+      const connected = await client.isConnected();
+      const providerLabel = providerManager.getProviderLabel(activeProvider);
+      if (!connected) {
+        console.log(`${PAD}${c.red}✗${c.reset} ${providerLabel}: Connection failed for ${currentModelLabel()}`);
+        return false;
+      }
+      console.log(`${PAD}${c.green}✓${c.reset} ${providerLabel}: Connected (${currentModelLabel()})`);
+    } catch (err) {
+      console.log(`${PAD}${c.red}✗${c.reset} ${err.message}`);
+      return false;
+    }
+  }
+
   const mcpConnected = await mcpClient.isConnected();
   if (mcpConnected) {
     const status = mcpClient.getStatus();
@@ -533,6 +579,187 @@ function listCustomCommands() {
     console.log(`${PAD}${c.green}/${name}${c.reset}  ${c.dim}${desc.slice(0, 60)}${c.reset}`);
   }
   console.log();
+}
+
+function normalizeProviderKey(raw) {
+  const key = String(raw || '').trim().toLowerCase();
+  if (!key) return null;
+  if (key === 'lmstudio' || key === 'local') return 'local';
+  if (PROVIDERS.includes(key)) return key;
+  return null;
+}
+
+function modelDisplayParts(model) {
+  if (!model) return { provider: 'local', providerLabel: 'LM Studio', label: '?' };
+  const provider = model.provider || 'local';
+  const providerLabel = PROVIDER_LABELS[provider] || provider;
+  return {
+    provider,
+    providerLabel,
+    label: `${model.name} (${model.key})`
+  };
+}
+
+function openUrlInBrowser(url) {
+  try {
+    const { exec } = require('child_process');
+    const escaped = url.replace(/"/g, '\\"');
+    if (process.platform === 'win32') {
+      exec(`start "" "${escaped}"`);
+    } else if (process.platform === 'darwin') {
+      exec(`open "${escaped}"`);
+    } else {
+      exec(`xdg-open "${escaped}"`);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function switchModel(modelKey, options = {}) {
+  const silent = options.silent === true;
+  const oldModel = modelRegistry.getCurrentModel();
+
+  modelRegistry.setCurrent(modelKey);
+  config.set('activeModel', modelKey);
+  lastKnownTokens = 0;
+  const switched = modelRegistry.getCurrentModel();
+  const parts = modelDisplayParts(switched);
+
+  if (!silent) {
+    console.log(`${PAD}${c.green}✓ Model: ${switched.name}${c.reset} ${c.dim}(${switched.key}, ${parts.providerLabel})${c.reset}`);
+  }
+
+  if (statusBar) {
+    statusBar.update({
+      modelName: `${parts.providerLabel}: ${switched.name || switched.key}`,
+      modelId: switched.id || '',
+      contextLimit: switched.contextLimit || modelRegistry.getContextLimit()
+    });
+  }
+
+  const autoPrompt = modelRegistry.getPrompt();
+  if (promptManager.has(autoPrompt) && !silent) {
+    console.log(`${PAD}${c.dim}Prompt: ${autoPrompt}${c.reset}`);
+  }
+
+  const provider = switched.provider || 'local';
+  if (provider === 'local') {
+    if (switched.id && (!oldModel || switched.id !== oldModel.id || (oldModel.provider || 'local') !== 'local')) {
+      try {
+        const loaded = await lmStudio.getLoadedInstances();
+        for (const inst of loaded) {
+          try {
+            await lmStudio.unloadModel(inst.instanceId);
+            if (!silent) console.log(`${PAD}${c.dim}Unloaded ${inst.displayName || inst.key}${c.reset}`);
+          } catch (err) {
+            if (!silent) console.log(`${PAD}${c.yellow}⚠ Could not unload ${inst.key}: ${err.message}${c.reset}`);
+          }
+        }
+        const ctxLen = switched.contextLimit || 32768;
+        if (!silent) console.log(`${PAD}${c.dim}Loading ${switched.name} in LM Studio (ctx: ${(ctxLen / 1024).toFixed(0)}K)...${c.reset}`);
+        const result = await lmStudio.loadModel(switched.id, { contextLength: ctxLen });
+        if (!silent) console.log(`${PAD}${c.green}✓ Loaded in ${result.load_time_seconds?.toFixed(1)}s${c.reset}`);
+      } catch (err) {
+        if (!silent) {
+          console.log(`${PAD}${c.yellow}⚠ Could not auto-load: ${err.message}${c.reset}`);
+          console.log(`${PAD}${c.dim}Load it manually in LM Studio${c.reset}`);
+        }
+      }
+    }
+    if (switched.tags?.includes('vision') && !silent) {
+      console.log(`${PAD}${c.green}✓ Vision enabled (local)${c.reset}`);
+    }
+  } else {
+    try {
+      const client = await providerManager.getClientForModel(switched);
+      const ok = await client.isConnected();
+      if (!ok) throw new Error(`${parts.providerLabel} rejected the connection`);
+      if (!silent) console.log(`${PAD}${c.green}✓ Connected via ${parts.providerLabel}${c.reset}`);
+    } catch (err) {
+      throw new Error(`Could not connect to ${parts.providerLabel}: ${err.message}`);
+    }
+  }
+
+  if (switched.tags?.includes('max-quality') && !silent) {
+    console.log(`${PAD}${c.yellow}⚠ This model may be slow (spills to CPU)${c.reset}`);
+  }
+
+  if (!silent) console.log();
+}
+
+function listProviderStatus() {
+  const activeProvider = activeProviderKey();
+  const activeModel = modelRegistry.getCurrentModel();
+  const connected = providerStore.listProviders();
+
+  console.log(`\n${PAD}${c.cyan}Provider Connections:${c.reset}`);
+  console.log(`${PAD}${c.dim}  Active model: ${activeModel ? `${activeModel.name} (${activeModel.key})` : '?'}${c.reset}`);
+
+  console.log(`${PAD}${c.dim}  local (LM Studio): always available if LM Studio is running${c.reset}`);
+  for (const record of connected) {
+    const dot = record.connected ? `${c.green}●${c.reset}` : `${c.red}●${c.reset}`;
+    const marker = activeProvider === record.provider ? `${c.cyan}*${c.reset}` : ' ';
+    const modelCount = Object.keys(record.models || {}).length;
+    console.log(`${PAD}${marker} ${record.provider}: ${dot} ${record.connected ? 'connected' : 'not connected'} ${c.dim}(${modelCount} aliases)${c.reset}`);
+  }
+  console.log();
+}
+
+async function connectProviderInteractive(provider) {
+  if (!provider) {
+    const providerItems = PROVIDERS.map(p => ({
+      key: p,
+      label: PROVIDER_LABELS[p] || p,
+      description: p === 'openai'
+        ? 'OAuth device login for Codex subscription'
+        : 'Connect with API key',
+      tags: ['provider'],
+      active: providerStore.isConnected(p)
+    }));
+    const selected = await pick(providerItems, { title: 'Connect Provider' });
+    if (!selected) {
+      console.log(`${PAD}${c.dim}Cancelled${c.reset}\n`);
+      return;
+    }
+    provider = selected.key;
+  }
+  const providerLabel = PROVIDER_LABELS[provider] || provider;
+
+  if (provider === 'anthropic' || provider === 'openrouter') {
+    const label = provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENROUTER_API_KEY';
+    console.log(`\n${PAD}${c.cyan}${providerLabel} Connection${c.reset}`);
+    const apiKey = await askQuestion(`${PAD}${c.yellow}Paste ${label}: ${c.reset}`);
+    if (!apiKey || !apiKey.trim()) {
+      console.log(`${PAD}${c.yellow}Cancelled (empty key).${c.reset}\n`);
+      return;
+    }
+    providerStore.connectWithApiKey(provider, apiKey.trim());
+    modelRegistry.refreshRemoteModels();
+    console.log(`${PAD}${c.green}✓ Connected ${providerLabel}${c.reset}`);
+    console.log(`${PAD}${c.dim}Use /model to switch to ${providerLabel} models.${c.reset}\n`);
+    return;
+  }
+
+  if (provider === 'openai') {
+    console.log(`\n${PAD}${c.cyan}OpenAI OAuth (Codex subscription)${c.reset}`);
+    const device = await providerManager.beginOpenAIDeviceLogin();
+    console.log(`${PAD}${c.dim}1) Open:${c.reset} ${c.cyan}${device.verificationUrl}${c.reset}`);
+    console.log(`${PAD}${c.dim}2) Enter code:${c.reset} ${c.yellow}${device.userCode}${c.reset}`);
+    const opened = openUrlInBrowser(device.verificationUrl);
+    if (opened) {
+      console.log(`${PAD}${c.dim}Opened browser automatically.${c.reset}`);
+    }
+    console.log(`${PAD}${c.dim}Waiting for authorization (up to 15 minutes)...${c.reset}`);
+    await providerManager.completeOpenAIDeviceLogin(device);
+    modelRegistry.refreshRemoteModels();
+    console.log(`${PAD}${c.green}✓ Connected OpenAI via OAuth${c.reset}`);
+    console.log(`${PAD}${c.dim}Use /model to switch to OpenAI Codex models.${c.reset}\n`);
+    return;
+  }
+
+  throw new Error(`Unsupported provider: ${provider}`);
 }
 
 // =============================================================================
@@ -847,7 +1074,7 @@ async function handleCommand(input) {
     case '/think':
       if (!modelRegistry.currentSupportsThinking()) {
         console.log(`\n${PAD}${c.yellow}⚠ Current model (${modelRegistry.getCurrent()}) doesn't support thinking mode.${c.reset}`);
-        console.log(`${PAD}${c.dim}Switch to gpt-oss (/model gpt-oss) to use thinking.${c.reset}\n`);
+        console.log(`${PAD}${c.dim}Switch to a model with reasoning support via /model.${c.reset}\n`);
       } else {
         thinkingMode = !thinkingMode;
         const thinkIcon = thinkingMode ? `${c.cyan}🧠 ON${c.reset}` : `${c.dim}OFF${c.reset}`;
@@ -860,6 +1087,10 @@ async function handleCommand(input) {
       return true;
 
     case '/ctx':
+      if (activeProviderKey() !== 'local') {
+        console.log(`\n${PAD}${c.yellow}/ctx is only available for local LM Studio models.${c.reset}\n`);
+        return true;
+      }
       if (!args) {
         const currentCtx = modelRegistry.getContextLimit();
         console.log(`\n${PAD}${c.cyan}Context: ${(currentCtx / 1024).toFixed(0)}K${c.reset} ${c.dim}(${currentCtx.toLocaleString()} tokens)${c.reset}`);
@@ -947,16 +1178,23 @@ async function handleCommand(input) {
       console.log(`${PAD}${c.dim}  The AI reads files on demand and streams the final response.${c.reset}\n`);
       return true;
 
+    case '/work':
+    case '/code':
+      interactionMode = 'work';
+      console.log(`\n${PAD}${c.green}  ✓ Switched to WORK mode${c.reset}`);
+      console.log(`${PAD}${c.dim}  File operations and commands will be executed normally.${c.reset}\n`);
+      return true;
+
     case '/plan':
       if (interactionMode === 'plan') {
-        interactionMode = 'code';
-        console.log(`\n${PAD}${c.green}  ✓ Switched to CODE mode${c.reset}`);
+        interactionMode = 'work';
+        console.log(`\n${PAD}${c.green}  ✓ Switched to WORK mode${c.reset}`);
         console.log(`${PAD}${c.dim}  File operations and commands will be executed normally.${c.reset}\n`);
       } else {
         interactionMode = 'plan';
         console.log(`\n${PAD}${c.cyan}📋 PLAN MODE: ON${c.reset}`);
-        console.log(`${PAD}${c.dim}  AI will create a plan (saved to .ripley/plan.md) instead of code.${c.reset}`);
-        console.log(`${PAD}${c.dim}  Use /implement to execute the plan, or /plan to switch back.${c.reset}\n`);
+        console.log(`${PAD}${c.dim}  AI explores the codebase and builds a structured plan.${c.reset}`);
+        console.log(`${PAD}${c.dim}  After the plan, choose: implement, reject, or refine.${c.reset}\n`);
       }
       return true;
 
@@ -975,7 +1213,7 @@ async function handleCommand(input) {
       if (confirmImpl.toLowerCase() === 'y' || confirmImpl.toLowerCase() === 'yes') {
         // Switch to code mode and send the plan for implementation
         const prevMode = interactionMode;
-        interactionMode = 'code';
+        interactionMode = 'work';
         console.log(`\n${PAD}${c.cyan}🚀 Implementing plan...${c.reset}\n`);
         await sendMessage(`Please implement this plan:\n\n${planContent}\n\nApply the changes now using <file_operation> tags.`);
         interactionMode = prevMode;
@@ -986,24 +1224,24 @@ async function handleCommand(input) {
 
     case '/ask':
       if (interactionMode === 'ask') {
-        interactionMode = 'code';
-        console.log(`\n${PAD}${c.green}  ✓ Switched to CODE mode${c.reset}`);
+        interactionMode = 'work';
+        console.log(`\n${PAD}${c.green}  ✓ Switched to WORK mode${c.reset}`);
         console.log(`${PAD}${c.dim}  File operations and commands will be executed normally.${c.reset}\n`);
       } else {
         interactionMode = 'ask';
         console.log(`\n${c.magenta}  💬 ASK MODE: ON${c.reset}`);
         console.log(`${PAD}${c.dim}  Question-only mode - AI will answer questions without generating code operations.${c.reset}`);
-        console.log(`${PAD}${c.dim}  Use /ask again to switch back to code mode.${c.reset}\n`);
+        console.log(`${PAD}${c.dim}  Use /ask again to switch back to work mode.${c.reset}\n`);
       }
       return true;
 
     case '/mode':
-      const modeColors = { code: c.green, plan: c.cyan, ask: c.magenta };
-      const modeIcons = { code: '⚡', plan: '📋', ask: '💬' };
+      const modeColors = { work: c.green, plan: c.cyan, ask: c.magenta };
+      const modeIcons = { work: '🔧', plan: '📋', ask: '💬' };
       console.log(`\n${PAD}Current mode: ${modeColors[interactionMode]}${modeIcons[interactionMode]} ${interactionMode.toUpperCase()}${c.reset}`);
-      console.log(`${PAD}${c.dim}  /plan - Preview changes without executing${c.reset}`);
-      console.log(`${PAD}${c.dim}  /ask  - Question-only mode (no operations)${c.reset}`);
-      console.log(`${PAD}${c.dim}  Use /plan or /ask again to return to code mode${c.reset}\n`);
+      console.log(`${PAD}${c.dim}  /work - Execute file operations and commands${c.reset}`);
+      console.log(`${PAD}${c.dim}  /plan - Explore codebase and build structured plan${c.reset}`);
+      console.log(`${PAD}${c.dim}  /ask  - Question-only mode (no operations)${c.reset}\n`);
       return true;
 
     case '/prompt':
@@ -1045,63 +1283,6 @@ async function handleCommand(input) {
     case '/models':
       const modelArg = args.trim().toLowerCase();
 
-      // Helper: switch model in registry + LM Studio
-      async function switchModel(modelKey) {
-        const oldModel = modelRegistry.getCurrentModel();
-        modelRegistry.setCurrent(modelKey);
-        config.set('activeModel', modelKey);
-        lastKnownTokens = 0; // Reset context counter for new model
-        const switched = modelRegistry.getCurrentModel();
-
-        console.log(`${PAD}${c.green}✓ Model: ${switched.name}${c.reset} ${c.dim}(${switched.key})${c.reset}`);
-
-        // Update status bar
-        if (statusBar) {
-          statusBar.update({
-            modelName: switched.name || switched.key,
-            modelId: switched.id || '',
-            contextLimit: switched.contextLimit || modelRegistry.getContextLimit()
-          });
-        }
-
-        // Show auto-prompt switch
-        const autoPrompt = modelRegistry.getPrompt();
-        if (promptManager.has(autoPrompt)) {
-          console.log(`${PAD}${c.dim}Prompt: ${autoPrompt}${c.reset}`);
-        }
-
-        // Load model in LM Studio (unload old one first)
-        if (switched.id && (!oldModel || switched.id !== oldModel.id)) {
-          try {
-            // Unload old model by finding its real instance ID
-            const loaded = await lmStudio.getLoadedInstances();
-            for (const inst of loaded) {
-              try {
-                await lmStudio.unloadModel(inst.instanceId);
-                console.log(`${PAD}${c.dim}Unloaded ${inst.displayName || inst.key}${c.reset}`);
-              } catch (err) {
-                console.log(`${PAD}${c.yellow}⚠ Could not unload ${inst.key}: ${err.message}${c.reset}`);
-              }
-            }
-            const ctxLen = switched.contextLimit || 32768;
-            console.log(`${PAD}${c.dim}Loading ${switched.name} in LM Studio (ctx: ${(ctxLen / 1024).toFixed(0)}K)...${c.reset}`);
-            const result = await lmStudio.loadModel(switched.id, { contextLength: ctxLen });
-            console.log(`${PAD}${c.green}✓ Loaded in ${result.load_time_seconds?.toFixed(1)}s${c.reset}`);
-          } catch (err) {
-            console.log(`${PAD}${c.yellow}⚠ Could not auto-load: ${err.message}${c.reset}`);
-            console.log(`${PAD}${c.dim}Load it manually in LM Studio${c.reset}`);
-          }
-        }
-
-        if (switched.tags?.includes('max-quality')) {
-          console.log(`${PAD}${c.yellow}⚠ This model may be slow (spills to CPU)${c.reset}`);
-        }
-        if (switched.tags?.includes('vision')) {
-          console.log(`${PAD}${c.green}✓ Vision enabled (local)${c.reset}`);
-        }
-        console.log();
-      }
-
       if (!modelArg) {
         // Interactive model picker
         const models = modelRegistry.list();
@@ -1129,6 +1310,80 @@ async function handleCommand(input) {
         console.log(`\n${PAD}${c.red}✗ ${err.message}${c.reset}\n`);
       }
       return true;
+
+    case '/connect': {
+      const connectArgs = args.trim();
+      if (!connectArgs || connectArgs === 'status' || connectArgs === 'list') {
+        if (!connectArgs) {
+          await connectProviderInteractive(null);
+        } else {
+          listProviderStatus();
+        }
+        return true;
+      }
+
+      const [subcommand, secondArg] = connectArgs.split(/\s+/, 2);
+      const normalizedSub = subcommand.toLowerCase();
+
+      if (normalizedSub === 'disconnect') {
+        const provider = normalizeProviderKey(secondArg);
+        if (!provider || provider === 'local') {
+          console.log(`\n${PAD}${c.yellow}Usage: /connect disconnect <anthropic|openai|openrouter>${c.reset}\n`);
+          return true;
+        }
+        const wasActiveProvider = (modelRegistry.getCurrentModel()?.provider || 'local') === provider;
+        providerStore.disconnect(provider);
+        modelRegistry.refreshRemoteModels();
+        if (wasActiveProvider) {
+          const fallback = modelRegistry.getDefault();
+          if (fallback) await switchModel(fallback);
+        }
+        console.log(`\n${PAD}${c.green}✓ Disconnected ${PROVIDER_LABELS[provider] || provider}${c.reset}\n`);
+        return true;
+      }
+
+      if (normalizedSub === 'use') {
+        const provider = normalizeProviderKey(secondArg);
+        if (!provider) {
+          console.log(`\n${PAD}${c.yellow}Usage: /connect use <local|anthropic|openai|openrouter>${c.reset}\n`);
+          return true;
+        }
+
+        const envFallback = (provider === 'anthropic' && !!process.env.ANTHROPIC_API_KEY)
+          || (provider === 'openrouter' && !!process.env.OPENROUTER_API_KEY);
+        if (provider !== 'local' && !providerStore.isConnected(provider) && !envFallback) {
+          console.log(`\n${PAD}${c.red}✗ ${PROVIDER_LABELS[provider] || provider} is not connected. Run /connect ${provider}.${c.reset}\n`);
+          return true;
+        }
+
+        const candidate = modelRegistry.list().find(m => (m.provider || 'local') === provider);
+        if (!candidate) {
+          console.log(`\n${PAD}${c.red}✗ No models available for ${PROVIDER_LABELS[provider] || provider}.${c.reset}\n`);
+          return true;
+        }
+
+        await switchModel(candidate.key);
+        return true;
+      }
+
+      const provider = normalizeProviderKey(subcommand);
+      if (!provider || provider === 'local') {
+        console.log(`\n${PAD}${c.yellow}Usage:${c.reset}`);
+        console.log(`${PAD}${c.dim}  /connect${c.reset}`);
+        console.log(`${PAD}${c.dim}  /connect <anthropic|openai|openrouter>${c.reset}`);
+        console.log(`${PAD}${c.dim}  /connect status${c.reset}`);
+        console.log(`${PAD}${c.dim}  /connect disconnect <provider>${c.reset}`);
+        console.log(`${PAD}${c.dim}  /connect use <local|provider>${c.reset}\n`);
+        return true;
+      }
+
+      try {
+        await connectProviderInteractive(provider);
+      } catch (err) {
+        console.log(`\n${PAD}${c.red}✗ ${err.message}${c.reset}\n`);
+      }
+      return true;
+    }
 
     case '/mcp':
       console.log(`\n${PAD}${c.cyan}MCP Server Status${c.reset}`);
@@ -1317,11 +1572,14 @@ async function compactHistory() {
   ];
 
   try {
-    const data = await lmStudio.chat(summaryMessages, {
+    const activeClient = await getActiveClient();
+    const activeModelMeta = modelRegistry.getCurrentModel();
+    const data = await activeClient.chat(summaryMessages, {
       model: modelRegistry.getCurrentId(),
       temperature: 0.3,
       maxTokens: 1500,
-      thinking: false
+      thinking: false,
+      reasoningEffort: activeModelMeta?.reasoningEffort
     });
     const summary = data.choices?.[0]?.message?.content?.trim();
     if (!summary) throw new Error('Empty summary');
@@ -1411,8 +1669,14 @@ async function sendMessage(message) {
   try {
     await sendAgenticMessage(fullMessage, pendingImages, message);
   } catch (error) {
+    const provider = activeProviderKey();
+    const providerLabel = providerManager.getProviderLabel(provider);
     console.log(`\n${PAD}${c.red}✗ Error: ${error.message}${c.reset}`);
-    console.log(`${PAD}${c.dim}  Make sure LM Studio is running at ${lmStudio.baseUrl}${c.reset}\n`);
+    if (provider === 'local') {
+      console.log(`${PAD}${c.dim}  Make sure LM Studio is running at ${lmStudio.baseUrl}${c.reset}\n`);
+    } else {
+      console.log(`${PAD}${c.dim}  Check your ${providerLabel} connection with /connect status${c.reset}\n`);
+    }
   }
 }
 
@@ -1556,12 +1820,15 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
   if (statusBar) statusBar.startTiming();
 
   const streamInferenceSettings = modelRegistry.getInferenceSettings();
-  const response = await lmStudio.chatStream(messages, {
+  const activeClient = await getActiveClient();
+  const streamModelMeta = modelRegistry.getCurrentModel();
+  const response = await activeClient.chatStream(messages, {
     model: modelRegistry.getCurrentId(),
     temperature: streamInferenceSettings.temperature,
     topP: streamInferenceSettings.topP,
     repeatPenalty: streamInferenceSettings.repeatPenalty,
-    signal: currentAbortController.signal
+    signal: currentAbortController.signal,
+    reasoningEffort: streamModelMeta?.reasoningEffort
   });
 
   let fullResponse = '';
@@ -1716,7 +1983,8 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
   if (statusBar) statusBar.startTiming();
 
   try {
-    const runner = new AgenticRunner(lmStudio, {
+    const activeClient = await getActiveClient();
+    const runner = new AgenticRunner(activeClient, {
       onToolCall: (tool, args) => {
         const toolMsg = toolMessages[tool] || '🔧 Using';
         const detail = args.path || args.pattern || args.command || '';
@@ -1785,13 +2053,17 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     // Use model-specific inference settings
     currentAbortController = new AbortController();
     const inferenceSettings = modelRegistry.getInferenceSettings();
+    const agenticModelMeta = modelRegistry.getCurrentModel();
     const fullResponse = await runner.run(messages, projectDir, {
       model: modelRegistry.getCurrentId(),
       temperature: inferenceSettings.temperature,
       topP: inferenceSettings.topP,
       repeatPenalty: inferenceSettings.repeatPenalty,
       thinking: thinkingMode && modelRegistry.currentSupportsThinking(),
-      signal: currentAbortController.signal
+      signal: currentAbortController.signal,
+      reasoningEffort: agenticModelMeta?.reasoningEffort,
+      tools: interactionMode === 'plan' ? READ_ONLY_TOOLS : undefined,
+      readOnly: interactionMode === 'plan'
     });
 
     // Update context usage from actual API token count
@@ -1834,7 +2106,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
 
 async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-  const modeColors = { code: c.cyan, plan: c.cyan, ask: c.magenta };
+  const modeColors = { work: c.cyan, plan: c.cyan, ask: c.magenta };
   let i = 0;
   if (statusBar) statusBar.startTiming();
   const spinner = setInterval(() => {
@@ -1879,11 +2151,14 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
     }
 
     const compactInferenceSettings = modelRegistry.getInferenceSettings();
-    const data = await lmStudio.chat(messages, {
+    const activeClient = await getActiveClient();
+    const compactModelMeta = modelRegistry.getCurrentModel();
+    const data = await activeClient.chat(messages, {
       model: modelRegistry.getCurrentId(),
       temperature: compactInferenceSettings.temperature,
       topP: compactInferenceSettings.topP,
-      repeatPenalty: compactInferenceSettings.repeatPenalty
+      repeatPenalty: compactInferenceSettings.repeatPenalty,
+      reasoningEffort: compactModelMeta?.reasoningEffort
     });
 
     clearInterval(spinner);
@@ -1920,8 +2195,9 @@ async function processAIResponse(reply, originalMessage) {
     });
   }
 
-  // In plan mode, save the plan to file and don't parse for operations
+  // In plan mode: save plan, then interactive review flow
   if (interactionMode === 'plan') {
+    // Save plan to file for reference
     const planPath = path.join(projectDir, '.ripley', 'plan.md');
     const ripleyDir = path.join(projectDir, '.ripley');
     if (!fs.existsSync(ripleyDir)) {
@@ -1929,11 +2205,37 @@ async function processAIResponse(reply, originalMessage) {
     }
     fs.writeFileSync(planPath, reply);
     console.log(`\n${PAD}${c.green}  ✓ Plan saved to .ripley/plan.md${c.reset}`);
-    console.log(`${PAD}${c.cyan}Use /implement to execute this plan${c.reset}\n`);
 
     // Update conversation history
     conversationHistory.push({ role: 'user', content: originalMessage });
     conversationHistory.push({ role: 'assistant', content: reply });
+
+    // Interactive review loop
+    let reviewing = true;
+    while (reviewing) {
+      console.log(`${PAD}${c.cyan}┌─ Review Plan ─────────────────────────────${c.reset}`);
+      console.log(`${PAD}${c.cyan}│${c.reset} ${c.green}Enter/y${c.reset} = implement  ${c.red}n${c.reset} = reject  ${c.yellow}or type feedback to refine${c.reset}`);
+      console.log(`${PAD}${c.cyan}└───────────────────────────────────────────${c.reset}`);
+      const reviewInput = await askQuestion(`${PAD}${c.yellow}> ${c.reset}`);
+      const trimmed = reviewInput.trim().toLowerCase();
+
+      if (trimmed === '' || trimmed === 'y' || trimmed === 'yes') {
+        // Implement the plan
+        interactionMode = 'work';
+        console.log(`\n${PAD}${c.cyan}🚀 Implementing plan...${c.reset}\n`);
+        await sendMessage(`Please implement this plan:\n\n${reply}\n\nApply the changes now using <file_operation> tags.`);
+        reviewing = false;
+      } else if (trimmed === 'n' || trimmed === 'no') {
+        console.log(`\n${PAD}${c.dim}Plan rejected. Staying in plan mode.${c.reset}\n`);
+        reviewing = false;
+      } else {
+        // Refinement feedback - stay in plan mode, send refinement
+        console.log(`\n${PAD}${c.cyan}📋 Refining plan...${c.reset}\n`);
+        await sendMessage(`Please refine the plan based on this feedback:\n\n${reviewInput}\n\nThe original plan was:\n\n${reply}`);
+        // After refinement, the recursive processAIResponse call handles the next review
+        reviewing = false;
+      }
+    }
     return;
   }
 
@@ -2261,7 +2563,12 @@ function createReadlineInterface() {
   rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    completer: (line) => completer.complete(line),
+    completer: (line) => {
+      if (inlineComplete && inlineComplete.consumeAccepted()) {
+        return [[], line];
+      }
+      return completer.complete(line);
+    },
     terminal: true
   });
 
@@ -2310,16 +2617,16 @@ function createReadlineInterface() {
 
     // --- Shift+Tab: Cycle through modes ---
     if (key.name === 'tab' && key.shift) {
-      const modes = ['code', 'plan', 'ask'];
+      const modes = ['work', 'plan', 'ask'];
       const currentIndex = modes.indexOf(interactionMode);
       const nextIndex = (currentIndex + 1) % modes.length;
       interactionMode = modes[nextIndex];
 
-      const modeColors = { code: c.green, plan: c.cyan, ask: c.magenta };
-      const modeIcons = { code: '⚡', plan: '📋', ask: '💬' };
+      const modeColors = { work: c.green, plan: c.cyan, ask: c.magenta };
+      const modeIcons = { work: '🔧', plan: '📋', ask: '💬' };
       const modeDescriptions = {
-        code: 'Execute file operations and commands',
-        plan: 'Preview changes without executing',
+        work: 'Execute file operations and commands',
+        plan: 'Explore codebase and build structured plan',
         ask: 'Question-only mode (no operations)'
       };
 
@@ -2452,14 +2759,16 @@ Examples:
 
   const connected = await checkConnection();
   if (!connected) {
-    process.exit(1);
+    console.log(`${PAD}${c.yellow}⚠ Starting in setup mode.${c.reset} ${c.dim}Use /connect or /model to switch providers/models.${c.reset}\n`);
   }
 
   // Prepare status bar (but don't install yet - readline resets scroll region)
   statusBar = new StatusBar();
   const mcpIsConnected = await mcpClient.isConnected();
+  const initialModel = modelRegistry.getCurrentModel();
+  const initialParts = modelDisplayParts(initialModel);
   statusBar.update({
-    modelName: modelRegistry.getCurrent() || '?',
+    modelName: `${initialParts.providerLabel}: ${initialModel?.name || '?'}`,
     modelId: modelRegistry.getCurrentId() || '',
     contextLimit: modelRegistry.getContextLimit(),
     mcpConnected: mcpIsConnected
@@ -2504,11 +2813,17 @@ Examples:
 
   const getPromptPrefix = () => {
     const modeIndicators = {
-      code: `${c.green}⚡${c.reset}`,
+      work: `${c.green}🔧${c.reset}`,
       plan: `${c.cyan}📋${c.reset}`,
       ask: `${c.magenta}💬${c.reset}`
     };
-    const modelName = modelRegistry.getCurrent() || '?';
+    const currentModel = modelRegistry.getCurrentModel();
+    const currentParts = modelDisplayParts(currentModel);
+    const modelName = currentModel
+      ? (currentModel.key.startsWith(`${currentParts.provider}:`)
+        ? currentModel.key
+        : `${currentParts.provider}:${currentModel.key}`)
+      : '?';
     const ctxPct = getContextPercent();
     const thinkIndicator = (thinkingMode && modelRegistry.currentSupportsThinking()) ? ` ${c.cyan}🧠${c.reset}` : '';
     return `${borderRenderer.prefix('user')}${modeIndicators[interactionMode]} ${c.dim}[${modelName}]${c.reset}${thinkIndicator} ${c.dim}ctx:${c.reset}${ctxPct} ${c.orange}You → ${c.reset}`;

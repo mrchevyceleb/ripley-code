@@ -1,10 +1,10 @@
 # Ripley Code
 
-A powerful local AI coding agent that runs on your own hardware. Direct connection to LM Studio - no middleware needed. Think Claude Code, but completely local and private.
+A coding agent with local + remote model support. Run local LM Studio models, or connect Anthropic/OpenAI/OpenRouter with `/connect`.
 
 ## What's New in v4.0.0
 
-- **Direct to LM Studio** - No more AI Router middleware. One process, one connection.
+- **Multi-provider support** - Local LM Studio + remote Anthropic/OpenAI/OpenRouter
 - **Named model profiles** - 7 models with friendly names and `/model` switching
 - **Auto-discovery** - Model IDs detected from LM Studio on startup
 - **Local vision** - Send images directly to vision models (Qwen3 VL)
@@ -14,7 +14,7 @@ A powerful local AI coding agent that runs on your own hardware. Direct connecti
 
 ## Prerequisites
 
-1. **LM Studio** running on `localhost:1234` with any model loaded
+1. **LM Studio** running on `localhost:1234` (only required for local models)
 2. **Node.js** 18+
 
 ## Installation
@@ -61,6 +61,18 @@ Switch between models with friendly names:
 /model vision-fast  Switch to Qwen3 VL 8B
 /model chat         Switch to GPT-OSS 20B
 /model mistral      Switch to Mistral Small 24B
+/model anthropic:claude-sonnet-4.7   Switch to connected Anthropic model
+/model openai:codex-5.3-medium       Switch to connected OpenAI Codex model
+```
+
+Connect remote providers:
+
+```
+/connect                   Interactive provider wizard
+/connect anthropic         Connect Anthropic with API key
+/connect openrouter        Connect OpenRouter with API key
+/connect openai            Connect OpenAI via OAuth device code
+/connect status            Show connection status
 ```
 
 Model choice persists across sessions. The active model shows in your prompt:
@@ -107,6 +119,7 @@ Add custom prompts by dropping `.md` files in the `prompts/` directory:
 | `/yolo` | Toggle YOLO mode (auto-apply) |
 | `/agent` | Toggle agentic mode (AI reads files on demand) |
 | `/model [name]` | Show/switch model |
+| `/connect [provider]` | Connect/manage remote providers |
 | `/prompt [name]` | Show/switch system prompt |
 
 ### Git, Session, Config, System
@@ -138,14 +151,16 @@ Add custom prompts by dropping `.md` files in the `prompts/` directory:
 ## Architecture
 
 ```
-Ripley Code v4.0.0  ──────────▶  LM Studio (localhost:1234)
+Ripley Code v4.0.0  ──────────▶  Local + Remote Providers
 ├── ripley.js                     Any local model
 ├── models.json
 ├── prompts/
 │   ├── base.md
 │   └── code-agent.md
 └── lib/
-    ├── lmStudio.js       Direct API client
+    ├── lmStudio.js       Local LM Studio API client
+    ├── providerStore.js  Global provider credentials/aliases
+    ├── providerManager.js Provider routing + auth handling
     ├── modelRegistry.js   Model switching
     ├── promptManager.js   Prompt loading
     ├── agenticRunner.js   Tool-calling loop
@@ -187,6 +202,8 @@ Also supports the legacy `.ripley/instructions.md` as a fallback.
 |----------|---------|---------|
 | `RIPLEY_LM_STUDIO_URL` | LM Studio URL | `http://localhost:1234` |
 | `GEMINI_API_KEY` | Gemini vision fallback | — |
+| `ANTHROPIC_API_KEY` | Anthropic API key fallback (if not saved via `/connect`) | — |
+| `OPENROUTER_API_KEY` | OpenRouter API key fallback (if not saved via `/connect`) | — |
 
 ## Changelog
 

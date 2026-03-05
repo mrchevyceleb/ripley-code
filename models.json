@@ -20,11 +20,12 @@
         "tool-calling"
       ],
       "tier": "fast",
-      "description": "Daily driver. Best open tool-calling model. MoE, 3.6B active."
+      "description": "Daily driver. Best open tool-calling model. MoE, 3.6B active.",
+      "provider": "local"
     },
     "coder": {
       "name": "Qwen3 Coder 30B",
-      "id": "qwen/qwen3-coder-30b",
+      "id": "qwen/qwen3.5-9b",
       "vram": "~18 GB",
       "contextLimit": 32768,
       "supportsThinking": false,
@@ -39,11 +40,12 @@
         "fast"
       ],
       "tier": "coding",
-      "description": "Primary coding model. MoE, 3B active, no thinking mode."
+      "description": "Primary coding model. MoE, 3B active, no thinking mode.",
+      "provider": "local"
     },
     "qwen35": {
       "name": "Qwen3.5 35B A3B",
-      "id": "qwen/qwen3.5-35b-a3b",
+      "id": "qwen/qwen3.5-9b",
       "vram": "21 GB",
       "contextLimit": 32768,
       "supportsThinking": true,
@@ -58,11 +60,12 @@
         "reasoning"
       ],
       "tier": "general",
-      "description": "Big single-shot tasks. MoE, thinks by default, 256K context."
+      "description": "Big single-shot tasks. MoE, thinks by default, 256K context.",
+      "provider": "local"
     },
     "glm": {
       "name": "GLM 4.7 Flash",
-      "id": "zai-org/glm-4.7-flash",
+      "id": "google/gemma-3-27b",
       "vram": "~18 GB",
       "contextLimit": 71680,
       "supportsThinking": true,
@@ -78,7 +81,8 @@
         "tool-calling"
       ],
       "tier": "fast",
-      "description": "Fast agentic model. MoE with MLA, 200K context, 3B active."
+      "description": "Fast agentic model. MoE with MLA, 200K context, 3B active.",
+      "provider": "local"
     },
     "qwen35s": {
       "name": "Qwen3.5 9B",
@@ -100,11 +104,12 @@
         "tool-calling"
       ],
       "tier": "fast",
-      "description": "Lightweight Qwen3.5 with vision, tool use, and reasoning. Only 6.5 GB."
+      "description": "Lightweight Qwen3.5 with vision, tool use, and reasoning. Only 6.5 GB.",
+      "provider": "local"
     },
     "gemma": {
       "name": "Gemma 3 27B",
-      "id": "google/gemma-3-27b",
+      "id": "qwen/qwen3.5-9b",
       "vram": "~17 GB",
       "contextLimit": 32768,
       "supportsThinking": false,
@@ -119,11 +124,12 @@
         "multimodal"
       ],
       "tier": "general",
-      "description": "Google's best open model. 27B dense, 128K context, multimodal."
+      "description": "Google's best open model. 27B dense, 128K context, multimodal.",
+      "provider": "local"
     },
     "nemotron": {
       "name": "Nemotron 3 Nano 30B",
-      "id": "nvidia/nemotron-3-nano",
+      "id": "qwen/qwen3.5-9b",
       "vram": "19.3 GB",
       "contextLimit": 32768,
       "supportsThinking": true,
@@ -138,11 +144,12 @@
         "coding"
       ],
       "tier": "fast",
-      "description": "Hybrid Mamba-2/Transformer MoE. 1M context capable, 3.5B active."
+      "description": "Hybrid Mamba-2/Transformer MoE. 1M context capable, 3.5B active.",
+      "provider": "local"
     },
     "max": {
       "name": "Qwen3 Coder Next 80B",
-      "id": "qwen/qwen3-coder-next",
+      "id": "qwen/qwen3.5-9b",
       "vram": "45.2 GB",
       "contextLimit": 131072,
       "supportsThinking": false,
@@ -156,7 +163,8 @@
         "max-quality"
       ],
       "tier": "max",
-      "description": "Maximum quality. Slow (spills to CPU RAM)."
+      "description": "Maximum quality. Slow (spills to CPU RAM).",
+      "provider": "local"
     }
   }
 }
