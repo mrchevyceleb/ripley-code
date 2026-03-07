@@ -83,6 +83,7 @@ let tokenCounter = null;
 let watcher = null;
 let imageHandler = null;
 let visionAnalyzer = null;
+let showGeminiKeyPrompt = null; // assigned in createReadlineInterface (needs readline closure)
 let lmStudio = null;
 let promptManager = null;
 let modelRegistry = null;
@@ -3359,7 +3360,9 @@ function createReadlineInterface() {
     // --- Escape: Cancel Gemini key prompt if active ---
     if (key.name === 'escape' && awaitingGeminiKey) {
       awaitingGeminiKey = false;
-      console.log(`\n${PAD}${c.dim}Cancelled${c.reset}\n`);
+      process.stdout.clearLine(0);
+      process.stdout.cursorTo(0);
+      console.log(`${PAD}${c.dim}Cancelled${c.reset}\n`);
       if (geminiKeyCallback) {
         geminiKeyCallback(false);
         geminiKeyCallback = null;
@@ -3613,7 +3616,7 @@ Examples:
   let awaitingGeminiKey = false;
   let geminiKeyCallback = null;
 
-  const showGeminiKeyPrompt = (callback) => {
+  showGeminiKeyPrompt = (callback) => {
     awaitingGeminiKey = true;
     geminiKeyCallback = callback || null;
     console.log(`\n${PAD}${c.yellow}No Gemini API key set${c.reset}`);
@@ -3647,7 +3650,7 @@ Examples:
     // Handle Gemini API key input
     if (awaitingGeminiKey) {
       awaitingGeminiKey = false;
-      const key = fullInput.trim();
+      const key = fullInput.split('\n')[0].trim();
       if (key) {
         saveGeminiKey(key);
         if (geminiKeyCallback) geminiKeyCallback(true);
