@@ -2195,6 +2195,8 @@ async function sendMessage(message) {
   fullMessage += `\n\n## Request\n\n${message}${systemNote}`;
   if (hasVisionImages) {
     fullMessage += '\n\n## Vision Guidance\n\nUse attached image content as the primary source of truth for this request. Do not call file tools unless the user explicitly asks for repository/file analysis.';
+  } else if (imageAnalysis) {
+    fullMessage += '\n\n## Vision Guidance\n\nThe user pasted screenshot(s) which were analyzed by a vision AI. The Image Analysis section above is your primary source of truth for this request. Focus on describing and responding to the image content, not the project file listing. Do not call file tools unless the user explicitly asks for repository/file analysis.';
   }
 
   try {
@@ -3331,17 +3333,7 @@ function createReadlineInterface() {
         const sizeKB = Math.round(result.data.size / 1024);
         console.log(`${PAD}${c.green}✓ Screenshot added (${sizeKB}KB)${c.reset}`);
 
-        if (modelRegistry.currentSupportsVision()) {
-          console.log(`${PAD}${c.dim}Type your question about the screenshot${c.reset}`);
-          console.log();
-          repromptWithStatus();
-        } else if (visionAnalyzer.isEnabled()) {
-          console.log(`${PAD}${c.cyan}🔍 Analyzing with Gemini...${c.reset}`);
-          const analysis = await visionAnalyzer.analyzeImage(result.data, '');
-          if (analysis) {
-            console.log(`${PAD}${c.green}✓ Image analyzed - ready for your question${c.reset}`);
-            result.data.analysis = analysis;
-          }
+        if (modelRegistry.currentSupportsVision() || visionAnalyzer.isEnabled()) {
           console.log(`${PAD}${c.dim}Type your question about the screenshot${c.reset}`);
           console.log();
           repromptWithStatus();
