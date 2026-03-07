@@ -2461,6 +2461,8 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     get_calendar: '📅 Checking calendar',
     get_email_summary: '📧 Reading emails',
     search_memory: '🧠 Searching memory',
+    deep_research: '🔬 Deep researching',
+    web_search: '🌐 Web searching',
     call_mcp: '🔌 Calling service'
   };
 
