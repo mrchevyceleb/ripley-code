@@ -2206,24 +2206,18 @@ async function sendMessage(message) {
 }
 
 async function sendStreamingMessage(message, images = [], rawMessage = '') {
-  // Fun thinking messages that rotate while generating
-  const thinkingMessages = [
-    'Brewing some code...',
-    'Consulting the matrix...',
-    'Waking up neurons...',
-    'Channeling the code spirits...',
-    'Asking the rubber duck...',
-    'Compiling thoughts...',
-    'Searching the codeverse...',
-    'Summoning syntax...',
-    'Debugging reality...',
-    'Caffeinating...',
-    'Reading the docs (jk)...',
-    'Connecting synapses...',
-    'Loading creativity...',
-    'Thinking really hard...',
-    'Almost there...'
-  ];
+  // Contextual thinking message derived from user input
+  const streamUserText = (rawMessage || message || '').trim().replace(/[\r\n]+/g, ' ');
+  let thinkingMessage;
+  if (streamUserText.length > 0) {
+    let summary = streamUserText;
+    if (summary.length > 45) {
+      summary = summary.substring(0, 45).replace(/\s+\S*$/, '') + '...';
+    }
+    thinkingMessage = `Thinking about "${summary}"`;
+  } else {
+    thinkingMessage = 'Thinking...';
+  }
   const generatingMessages = [
     'Writing code...',
     'Crafting response...',
@@ -2249,14 +2243,19 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
     tickCount++;
 
-    // Change message every ~2 seconds (20 ticks at 100ms)
-    if (tickCount % 20 === 0) {
-      const messages = isGenerating ? generatingMessages : thinkingMessages;
-      messageIndex = (messageIndex + 1) % messages.length;
+    let currentMessage;
+    if (isGenerating) {
+      // Cycle generating messages every ~2 seconds
+      if (tickCount % 20 === 0) {
+        messageIndex = (messageIndex + 1) % generatingMessages.length;
+      }
+      currentMessage = generatingMessages[messageIndex % generatingMessages.length];
+    } else {
+      // Show contextual thinking with elapsed time after 3s
+      const elapsed = Math.floor(tickCount / 10);
+      currentMessage = elapsed >= 3 ? `${thinkingMessage} (${elapsed}s)` : thinkingMessage;
     }
 
-    const messages = isGenerating ? generatingMessages : thinkingMessages;
-    const currentMessage = messages[messageIndex % messages.length];
     const tokenInfo = isGenerating ? ` ${c.dim}(${tokenCount} tokens)${c.reset}` : '';
     const statusText = `${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${currentMessage}${c.reset}${tokenInfo}`;
 
@@ -2280,7 +2279,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
 
   // Start the status animation
   const startThinking = () => {
-    process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[0]} ${thinkingMessages[0]}${c.reset}`);
+    process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[0]} ${thinkingMessage}${c.reset}`);
     statusInterval = setInterval(updateStatus, 100);
     if (statusBar) statusBar.render();
   };
@@ -2454,26 +2453,54 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     read_file: '📖 Reading',
     list_files: '📁 Listing',
     search_code: '🔍 Searching',
-    create_file: '✍️  Writing',
+    create_file: '✍️  Creating',
     edit_file: '✏️  Editing',
-    run_command: '⚡ Running'
+    run_command: '⚡ Running',
+    get_tasks: '📋 Fetching tasks',
+    create_task: '📋 Creating task',
+    get_calendar: '📅 Checking calendar',
+    get_email_summary: '📧 Reading emails',
+    search_memory: '🧠 Searching memory',
+    call_mcp: '🔌 Calling service'
   };
+
+  // Contextual thinking message from user input
+  const agenticUserText = (rawMessage || message || '').trim().replace(/[\r\n]+/g, ' ');
+  let agenticThinking;
+  if (agenticUserText.length > 0) {
+    let summary = agenticUserText;
+    if (summary.length > 45) {
+      summary = summary.substring(0, 45).replace(/\s+\S*$/, '') + '...';
+    }
+    agenticThinking = `Thinking about "${summary}"`;
+  } else {
+    agenticThinking = 'Thinking...';
+  }
 
   const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let spinnerIndex = 0;
   let statusInterval = null;
-  let currentStatus = 'Thinking...';
+  let currentStatus = agenticThinking;
   let toolCallsDisplayed = [];
   let streamingStarted = false;
   let spinnerTick = 0;
   let streamedTokenCount = 0;
+  let stepCount = 0;
 
   const updateSpinner = () => {
     spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
     spinnerTick++;
+    // Add elapsed time to initial thinking (before tool calls start)
+    let displayStatus = currentStatus;
+    if (stepCount === 0) {
+      const elapsed = Math.floor(spinnerTick / 10);
+      if (elapsed >= 3) {
+        displayStatus = `${currentStatus} (${elapsed}s)`;
+      }
+    }
     process.stdout.clearLine(0);
     process.stdout.cursorTo(0);
-    process.stdout.write(`${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${currentStatus}${c.reset}`);
+    process.stdout.write(`${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${displayStatus}${c.reset}`);
     if (statusBar) {
       statusBar.refresh();
     }
@@ -2544,9 +2571,12 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     const activeClient = await getActiveClient();
     const runner = new AgenticRunner(activeClient, {
       onToolCall: (tool, args) => {
+        stepCount++;
         const toolMsg = toolMessages[tool] || '🔧 Using';
-        const detail = args.path || args.pattern || args.command || '';
-        currentStatus = `${toolMsg} ${detail}...`;
+        const detail = args.path || args.pattern || args.command || args.query || (tool === 'call_mcp' ? args.tool : '') || '';
+        currentStatus = detail
+          ? `Step ${stepCount} · ${toolMsg} ${detail}`
+          : `Step ${stepCount} · ${toolMsg}`;
         updateSpinner();
         toolCallsDisplayed.push({ tool, args });
       },
@@ -2561,10 +2591,13 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
 
           // Show tool call summary
           if (toolCallsDisplayed.length > 0) {
-            console.log(`${borderRenderer.prefix('tool')}${c.dim}┌─ ${toolCallsDisplayed.length} action(s)${c.reset}`);
+            const stepWord = toolCallsDisplayed.length === 1 ? 'step' : 'steps';
+            console.log(`${borderRenderer.prefix('tool')}${c.dim}┌─ ${toolCallsDisplayed.length} ${stepWord} completed${c.reset}`);
             for (const tc of toolCallsDisplayed) {
               const icon = toolMessages[tc.tool]?.split(' ')[0] || '🔧';
-              console.log(`${borderRenderer.prefix('tool')}${c.dim}│ ${icon} ${tc.args.path || tc.args.pattern || tc.args.command || tc.tool}${c.reset}`);
+              const detail = tc.args.path || tc.args.pattern || tc.args.command || tc.args.query || (tc.tool === 'call_mcp' ? tc.args.tool : '') || '';
+              const label = detail || (toolMessages[tc.tool] || tc.tool).replace(/^\S+\s*/, '');
+              console.log(`${borderRenderer.prefix('tool')}${c.dim}│ ${c.green}✓${c.reset}${c.dim} ${icon} ${label}${c.reset}`);
             }
             console.log(`${borderRenderer.prefix('tool')}${c.dim}└─${c.reset}`);
           }
