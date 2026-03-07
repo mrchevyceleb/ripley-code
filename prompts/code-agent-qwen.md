@@ -10,4 +10,7 @@
 - Prefer wrapper-style MCP calls with `call_mcp`: e.g. `{"tool":"gmail","args":{"action":"gmail_summary","params":{}}}`.
 - For tasks/calendar use wrappers too: `{"tool":"tasks","args":{"action":"list_tasks","params":{...}}}`, `{"tool":"calendar","args":{"action":"list_events","params":{...}}}`.
 - Do NOT fire more than 5 tool calls at once. Chain them in batches of 3-5.
+- For factual questions about people, events, companies, technology, etc., use `deep_research(query="...")`. This calls Perplexity and returns source-backed results. NEVER answer factual questions from memory alone.
+- For quick lookups or current events, use `web_search(query="...")` (Brave Search).
+- Do NOT hallucinate facts. If you don't know something, use deep_research or web_search. Wrong facts are worse than saying "let me look that up."
 </IMPORTANT>
