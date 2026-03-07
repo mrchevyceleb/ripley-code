@@ -428,7 +428,7 @@ function initProject() {
   } else if (visionAnalyzer.isEnabled()) {
     console.log(`${PAD}${c.green}✓${c.reset} Vision: Gemini fallback`);
   } else {
-    console.log(`${PAD}${c.dim}○ Vision disabled (use /set geminiApiKey <key> or load a vision model)${c.reset}`);
+    console.log(`${PAD}${c.dim}○ Vision disabled (paste an image with Alt+V to set up, or load a vision model)${c.reset}`);
   }
 
   // Initialize MCP client
@@ -1301,7 +1301,12 @@ async function handleCommand(input) {
       const imgResult = imageHandler.addImage(args);
       if (imgResult.success) {
         console.log(`\n${PAD}${c.green}  ✓ Image queued: ${args}${c.reset}`);
-        console.log(`${PAD}${c.dim}Will be included in your next message${c.reset}\n`);
+        console.log(`${PAD}${c.dim}Will be included in your next message${c.reset}`);
+        if (!modelRegistry.currentSupportsVision() && !visionAnalyzer.isEnabled()) {
+          showGeminiKeyPrompt();
+          return true;
+        }
+        console.log();
       } else {
         console.log(`\n${PAD}${c.red}✗ ${imgResult.error}${c.reset}\n`);
       }
@@ -2148,7 +2153,7 @@ async function sendMessage(message) {
         console.log(`${PAD}${c.yellow}⚠ Image analysis failed, sending without description${c.reset}`);
       }
     } else {
-      console.log(`${PAD}${c.yellow}⚠ No vision capability (load a vision model or set GEMINI_API_KEY)${c.reset}`);
+      console.log(`${PAD}${c.yellow}⚠ No vision capability. Paste an image with Alt+V to set up your Gemini API key.${c.reset}`);
     }
   }
 
@@ -3325,20 +3330,41 @@ function createReadlineInterface() {
         const sizeKB = Math.round(result.data.size / 1024);
         console.log(`${PAD}${c.green}✓ Screenshot added (${sizeKB}KB)${c.reset}`);
 
-        if (visionAnalyzer.isEnabled()) {
+        if (modelRegistry.currentSupportsVision()) {
+          console.log(`${PAD}${c.dim}Type your question about the screenshot${c.reset}`);
+          console.log();
+          repromptWithStatus();
+        } else if (visionAnalyzer.isEnabled()) {
           console.log(`${PAD}${c.cyan}🔍 Analyzing with Gemini...${c.reset}`);
           const analysis = await visionAnalyzer.analyzeImage(result.data, '');
           if (analysis) {
             console.log(`${PAD}${c.green}✓ Image analyzed - ready for your question${c.reset}`);
             result.data.analysis = analysis;
           }
+          console.log(`${PAD}${c.dim}Type your question about the screenshot${c.reset}`);
+          console.log();
+          repromptWithStatus();
+        } else {
+          // No vision at all - prompt for Gemini API key
+          showGeminiKeyPrompt();
         }
-        console.log(`${PAD}${c.dim}Type your question about the screenshot${c.reset}`);
       } else {
         console.log(`${PAD}${c.red}✗ ${result.error}${c.reset}`);
+        console.log();
+        repromptWithStatus();
       }
-      console.log();
-      repromptWithStatus();
+      return;
+    }
+
+    // --- Escape: Cancel Gemini key prompt if active ---
+    if (key.name === 'escape' && awaitingGeminiKey) {
+      awaitingGeminiKey = false;
+      console.log(`\n${PAD}${c.dim}Cancelled${c.reset}\n`);
+      if (geminiKeyCallback) {
+        geminiKeyCallback(false);
+        geminiKeyCallback = null;
+      }
+      showPrompt();
       return;
     }
 
@@ -3584,8 +3610,56 @@ Examples:
   let pasteBuffer = [];
   let pasteTimer = null;
   let waitingForInput = false;
+  let awaitingGeminiKey = false;
+  let geminiKeyCallback = null;
+
+  const showGeminiKeyPrompt = (callback) => {
+    awaitingGeminiKey = true;
+    geminiKeyCallback = callback || null;
+    console.log(`\n${PAD}${c.yellow}No Gemini API key set${c.reset}`);
+    console.log(`${PAD}${c.dim}Vision needs either a vision model or a Gemini API key.${c.reset}`);
+    console.log(`${PAD}${c.dim}Get a free key at: ${c.cyan}https://aistudio.google.com/apikey${c.reset}`);
+    console.log();
+    waitingForInput = true;
+    rl.setPrompt(`${PAD}${c.cyan}Paste API key (Enter/Esc to skip): ${c.reset}`);
+    rl.prompt(false);
+    if (statusBar) statusBar.render();
+  };
+
+  const saveGeminiKey = (key) => {
+    const globalDir = path.join(os.homedir(), '.ripley');
+    const globalConfigPath = path.join(globalDir, 'config.json');
+    try {
+      fs.mkdirSync(globalDir, { recursive: true });
+      let gc = {};
+      if (fs.existsSync(globalConfigPath)) {
+        gc = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
+      }
+      gc.geminiApiKey = key;
+      fs.writeFileSync(globalConfigPath, JSON.stringify(gc, null, 2));
+    } catch {}
+    visionAnalyzer = new VisionAnalyzer({ apiKey: key });
+    console.log(`\n${PAD}${c.green}✓ Gemini API key saved globally${c.reset}`);
+    console.log(`${PAD}${c.dim}Vision is now enabled for all projects${c.reset}\n`);
+  };
 
   const processInput = async (fullInput) => {
+    // Handle Gemini API key input
+    if (awaitingGeminiKey) {
+      awaitingGeminiKey = false;
+      const key = fullInput.trim();
+      if (key) {
+        saveGeminiKey(key);
+        if (geminiKeyCallback) geminiKeyCallback(true);
+      } else {
+        console.log(`\n${PAD}${c.dim}Skipped${c.reset}\n`);
+        if (geminiKeyCallback) geminiKeyCallback(false);
+      }
+      geminiKeyCallback = null;
+      showPrompt();
+      return;
+    }
+
     const trimmed = fullInput.trim();
 
     if (!trimmed) {
@@ -3610,7 +3684,7 @@ Examples:
       if (!handled) {
         console.log(`\n${PAD}${c.dim}Unknown command. Type /help or /commands for available commands.${c.reset}\n`);
       }
-      showPrompt();
+      if (!awaitingGeminiKey) showPrompt();
       return;
     }
 
