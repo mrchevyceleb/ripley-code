@@ -173,8 +173,8 @@ const BANNER_ART_LINES = [
 ];
 const BANNER_WIDTH = 43;
 const ANIM_DISABLED_VALUES = new Set(['1', 'true', 'yes', 'on']);
-const BANNER_ANIMATION_TOTAL_MS = 8000;
-const BANNER_PULSE_STEPS = 6;
+const BANNER_ANIMATION_TOTAL_MS = 2500;
+const BANNER_PULSE_STEPS = 2;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -2272,9 +2272,9 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
       statusLineLength = statusText.length;
     }
 
-    // During long no-token phases, keep the pinned bar alive.
-    if (statusBar && tickCount % 10 === 0) {
-      statusBar.render();
+    // Keep the pinned bar alive during spinner updates.
+    if (statusBar) {
+      statusBar.refresh();
     }
   };
 
@@ -2297,6 +2297,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     process.stdout.write(aiLabel);
     // Tell word wrapper how much of the first line is already used
     wordWrapper.currentLineLength = borderRenderer.stripAnsi(aiLabel).length;
+    if (statusBar) statusBar.refresh();
   };
 
   const stopStatus = () => {
@@ -2473,8 +2474,8 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     process.stdout.clearLine(0);
     process.stdout.cursorTo(0);
     process.stdout.write(`${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${currentStatus}${c.reset}`);
-    if (statusBar && spinnerTick % 10 === 0) {
-      statusBar.render();
+    if (statusBar) {
+      statusBar.refresh();
     }
   };
 
@@ -3237,6 +3238,13 @@ function createReadlineInterface() {
       });
     }
 
+    // Repaint status bar after readline processes the keypress.
+    // Readline's line editing (especially backspace/delete) can overwrite
+    // the bar rows when the prompt line wraps or redraws.
+    if (statusBar) {
+      setImmediate(() => statusBar.render());
+    }
+
     // --- History navigation ---
     if (key.name === 'up') {
       const prev = historyManager.up(rl.line);
@@ -3459,12 +3467,8 @@ Examples:
     return `${color}${pct}%${c.reset}`;
   };
 
-  const getPromptPrefix = () => {
-    const modeIndicators = {
-      work: `${c.green}🔧${c.reset}`,
-      plan: `${c.cyan}📋${c.reset}`,
-      ask: `${c.magenta}💬${c.reset}`
-    };
+  // Shared prompt data used by both the live prompt and the highlighted repaint
+  const getPromptData = () => {
     const currentModel = modelRegistry.getCurrentModel();
     const currentParts = modelDisplayParts(currentModel);
     const modelName = currentModel
@@ -3472,9 +3476,35 @@ Examples:
         ? currentModel.key
         : `${currentParts.provider}:${currentModel.key}`)
       : '?';
-    const ctxPct = getContextPercent();
-    const thinkIndicator = (thinkingMode && modelRegistry.currentSupportsThinking()) ? ` ${c.cyan}🧠${c.reset}` : '';
-    return `${borderRenderer.prefix('user')}${modeIndicators[interactionMode]} ${c.dim}[${modelName}]${c.reset}${thinkIndicator} ${c.dim}ctx:${c.reset}${ctxPct} ${c.orange}You → ${c.reset}`;
+    const limit = modelRegistry.getContextLimit();
+    const usedTokens = projectedContextTokens > 0
+      ? projectedContextTokens
+      : estimateNextTurnContextTokens();
+    const pct = contextPercentForTokens(usedTokens, limit);
+    const modeIcon = { work: '🔧', plan: '📋', ask: '💬' }[interactionMode] || '🔧';
+    const think = (thinkingMode && modelRegistry.currentSupportsThinking()) ? ' 🧠' : '';
+    return { modelName, pct, modeIcon, think };
+  };
+
+  const getPromptPrefix = () => {
+    const { modelName, pct, modeIcon, think } = getPromptData();
+    let pctColor = c.green;
+    if (pct >= 80) pctColor = c.red;
+    else if (pct >= 50) pctColor = c.yellow;
+    return `${borderRenderer.prefix('user')}${c.green}${modeIcon}${c.reset} ${c.dim}[${modelName}]${c.reset}${think ? ` ${c.cyan}🧠${c.reset}` : ''} ${c.dim}ctx:${c.reset}${pctColor}${pct}%${c.reset} ${c.orange}You → ${c.reset}`;
+  };
+
+  // Build a highlighted version of the user prompt for post-submission repaint.
+  // Light orange bg, dark text, no ANSI reset conflicts.
+  const getHighlightedPrompt = (userText) => {
+    const BG = '\x1b[48;2;200;120;40m';
+    const FG = '\x1b[38;2;25;12;0m';
+    const ACCENT = `\x1b[38;2;100;55;15m`;  // Dimmer accent for metadata
+    const { modelName, pct, modeIcon, think } = getPromptData();
+    const cols = process.stdout.columns || 120;
+    const bgRow = `${BG}${' '.repeat(cols)}\x1b[0m`;
+    const content = `${BG}${FG}  │ ${modeIcon} [${modelName}]${think} ${ACCENT}ctx:${pct}%${FG} You → ${userText}\x1b[K\x1b[0m`;
+    return `${bgRow}\n${content}\n${bgRow}`;
   };
 
   const runStartupUiSelfCheck = () => {
@@ -3549,13 +3579,8 @@ Examples:
       return;
     }
 
-    // Echo user input with user border prefix
-    const userLines = trimmed.split('\n');
-    const userPrefix = borderRenderer.prefix('user');
-    process.stdout.write('\n');
-    for (const line of userLines) {
-      process.stdout.write(`${userPrefix}${c.white}${line}${c.reset}\n`);
-    }
+    // Repaint submitted input as a highlighted bar with vertical padding.
+    process.stdout.write(`\x1b[A\r${getHighlightedPrompt(trimmed)}\n\n`);
 
     // Send message to AI
     await sendMessage(trimmed);

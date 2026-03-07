@@ -31,14 +31,27 @@ No middleware. No AI Router. One process.
 | `lib/visionAnalyzer.js` | Local vision + Gemini fallback |
 | `lib/config.js` | Config management (lmStudioUrl, activeModel, activePrompt) |
 
+## Development Setup (IMPORTANT - Do This First)
+
+Before making any changes, ensure the global `ripley` command is symlinked to this repo so edits are instantly live:
+
+```bash
+npm link --force
+```
+
+This creates a symlink so the global `ripley` command points directly to `C:\ripley-code\ripley.js`. No rebuild or reinstall needed after edits. Just save and re-run `ripley`.
+
+**Verify it's working:**
+```bash
+where ripley
+# Should show C:\ripley-code\ripley.js
+```
+
 ## Development Commands
 
 ```bash
 # Run the CLI (in any project directory)
 node ripley.js
-
-# Install globally after changes
-npm link --force
 
 # Test safely (preview mode)
 node ripley.js
