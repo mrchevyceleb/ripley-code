@@ -1,6 +1,6 @@
 # Ripley Code - Local Model Research Reference
 
-Compiled March 3, 2026. All findings specific to running these models through LM Studio's OpenAI-compatible API on RTX 4090 (24GB VRAM).
+Compiled March 3, 2026. All findings specific to running these models through LM Studio's OpenAI-compatible API.
 
 ---
 

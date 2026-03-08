@@ -20,7 +20,7 @@
         "tool-calling"
       ],
       "tier": "fast",
-      "description": "Daily driver. Best open tool-calling model. MoE, 3.6B active.",
+      "description": "Fast open tool-calling model. MoE, 3.6B active.",
       "provider": "local"
     },
     "coder": {

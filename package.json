@@ -15,7 +15,7 @@
     "url": "https://github.com/mrchevyceleb/ripley-code.git"
   },
   "keywords": ["ai", "cli", "coding", "agent", "assistant"],
-  "author": "Matt",
+  "author": "Matt Johnston",
   "license": "MIT",
   "dependencies": {
     "chalk": "^5.3.0",

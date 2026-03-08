@@ -138,6 +138,6 @@ Users create `RIPLEY.md` at their project root (like CLAUDE.md for Claude Code).
 ## Environment
 
 - Windows with PowerShell
-- GPU: RTX 4090 (24GB VRAM)
+- GPU: NVIDIA GPU with sufficient VRAM for loaded models
 - LM Studio at localhost:1234
 - Node.js 18+
