@@ -42,6 +42,7 @@ const ModelRegistry = require('./lib/modelRegistry');
 const { ProviderStore, PROVIDERS } = require('./lib/providerStore');
 const { ProviderManager, PROVIDER_LABELS } = require('./lib/providerManager');
 const { AgenticRunner, TOOLS, READ_ONLY_TOOLS, setMcpClient } = require('./lib/agenticRunner');
+const { SubAgentManager, SPAWN_AGENT_TOOL_DEF } = require('./lib/subAgentManager');
 const McpClient = require('./lib/mcpClient');
 const { pick } = require('./lib/interactivePicker');
 const StatusBar = require('./lib/statusBar');
@@ -92,6 +93,7 @@ let modelRegistry = null;
 let providerStore = null;
 let providerManager = null;
 let mcpClient = null;
+let subAgentManager = null;
 let statusBar = null;
 let inlineComplete = null;
 let conversationHistory = [];
@@ -117,6 +119,13 @@ let midTurnSteerRequested = false;
 // Abort controller for cancelling requests with Escape (double-press)
 let currentAbortController = null;
 let lastEscapeTime = 0;
+
+// Mid-turn input: user can type while agent is working (like Claude Code)
+let spinnerPaused = false;          // true when user is typing mid-turn
+let steeringInputActive = false;    // true when steering prompt is visible
+let pauseSpinnerFn = null;          // set by sendAgenticMessage, called from keypress
+let resumeSpinnerFn = null;         // set by sendAgenticMessage, called after steer/cancel
+let restorePromptFn = null;         // set by main(), restores normal readline prompt
 
 // Truncate an ANSI-decorated string to fit within the terminal width.
 // Walks visible characters only, keeping ANSI escape sequences intact.
@@ -294,7 +303,7 @@ ${P}${c.yellow}/implement${c.reset}          Execute the saved plan from .ripley
 ${P}${c.yellow}/ask${c.reset}                Toggle ASK mode (questions only, no file ops)
 ${P}${c.yellow}/mode${c.reset}               Show current mode
 ${P}${c.yellow}/yolo${c.reset}               Toggle YOLO mode (auto-apply all changes)
-${P}${c.yellow}/agent${c.reset}              Show agentic mode info (always on)
+${P}${c.yellow}/agent [model] [task]${c.reset} Spawn sub-agent or show agent commands
 ${P}${c.yellow}/steer <text>${c.reset}       Steer next turn (or interrupt + redirect current turn)
 ${P}${c.yellow}/model [name]${c.reset}      Show/switch model
 ${P}${c.yellow}/model search <query>${c.reset} Search OpenRouter models and add one
@@ -457,6 +466,15 @@ function initProject() {
   const mcpUrl = config.get('mcpUrl') || process.env.MCP_SERVER_URL || null;
   mcpClient = new McpClient(mcpUrl ? { url: mcpUrl } : {});
   setMcpClient(mcpClient);
+
+  // Initialize Sub-Agent Manager
+  subAgentManager = new SubAgentManager({
+    providerManager,
+    modelRegistry,
+    promptManager,
+    config,
+    projectDir
+  });
 
   console.log(`${PAD}${c.cyan}✓${c.reset} Mode: always agentic ${c.dim}(reads files on demand, streams final response)${c.reset}`);
 }
@@ -1651,8 +1669,7 @@ async function handleCommand(input) {
       return true;
 
     case '/agent':
-      console.log(`\n${PAD}${c.cyan}Ripley is always agentic.${c.reset}`);
-      console.log(`${PAD}${c.dim}  The AI reads files on demand and streams the final response.${c.reset}\n`);
+      await handleAgentCommand(args);
       return true;
 
     case '/work':
@@ -2462,6 +2479,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
 
   // Update status line (shown during both thinking and generating)
   const updateStatus = () => {
+    if (spinnerPaused) return; // Don't overwrite user's typing
     spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
     tickCount++;
 
@@ -2522,7 +2540,27 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
       clearInterval(statusInterval);
       statusInterval = null;
     }
+    // Clean up steering state if user was mid-steer when response arrived
+    if (steeringInputActive && rl) {
+      rl.write(null, { ctrl: true, name: 'u' });
+      process.stdout.write('\x1b[2K\x1b[0G');
+      if (restorePromptFn) restorePromptFn();
+    }
+    spinnerPaused = false;
+    steeringInputActive = false;
+    pauseSpinnerFn = null;
+    resumeSpinnerFn = null;
     if (statusBar) statusBar.render();
+  };
+
+  // Wire up pause/resume for mid-turn steering (streaming path)
+  pauseSpinnerFn = () => {
+    process.stdout.write('\x1b[2K\x1b[0G');
+  };
+  resumeSpinnerFn = () => {
+    spinnerPaused = false;
+    steeringInputActive = false;
+    updateStatus();
   };
 
   // Determine which prompt to use - mirror agentic path's model-specific logic
@@ -2613,6 +2651,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
       if (remaining) process.stdout.write(remaining);
       fullResponse = response;
       stopStatus();
+      midTurnSteerRequested = false; // Clear stale steer flag on normal completion
       if (statusBar) statusBar.stopTiming();
     },
     onError: (error) => {
@@ -2663,6 +2702,223 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
   await processAIResponse(fullResponse, message);
 }
 
+// =============================================================================
+// SUB-AGENT COMMAND HANDLER
+// =============================================================================
+
+async function handleAgentCommand(args) {
+  if (!subAgentManager) {
+    console.log(`\n${PAD}${c.red}Sub-agent manager not initialized.${c.reset}\n`);
+    return;
+  }
+
+  const parts = (args || '').trim().split(/\s+/);
+  const subCommand = parts[0]?.toLowerCase();
+
+  // /agent (no args) - show help
+  if (!subCommand) {
+    console.log(`
+${PAD}${c.orange}Sub-Agent System${c.reset}
+${PAD}${c.dim}Spawn sub-agents on any connected model/provider.${c.reset}
+
+${PAD}${c.yellow}/agent <model> <task>${c.reset}      Spawn a sub-agent
+${PAD}${c.yellow}/agent list${c.reset}                 List all session agents
+${PAD}${c.yellow}/agent status <id>${c.reset}           Show agent details
+${PAD}${c.yellow}/agent models${c.reset}               List available models
+
+${PAD}${c.dim}Model format: "provider:alias" (e.g., anthropic:claude-sonnet-4.6, local:current)${c.reset}
+${PAD}${c.dim}AI can also spawn agents via the spawn_agent tool during conversations.${c.reset}
+`);
+    return;
+  }
+
+  // /agent list
+  if (subCommand === 'list') {
+    const agents = subAgentManager.listAgents();
+    if (agents.length === 0) {
+      console.log(`\n${PAD}${c.dim}No agents spawned this session.${c.reset}\n`);
+      return;
+    }
+    console.log(`\n${PAD}${c.orange}Session Agents (${agents.length})${c.reset}`);
+    for (const agent of agents) {
+      const statusIcon = agent.status === 'completed' ? `${c.green}done${c.reset}`
+        : agent.status === 'failed' ? `${c.red}fail${c.reset}`
+        : agent.status === 'cancelled' ? `${c.yellow}cancelled${c.reset}`
+        : `${c.cyan}running${c.reset}`;
+      const elapsed = agent.completedAt
+        ? `${((agent.completedAt - agent.startedAt) / 1000).toFixed(1)}s`
+        : 'running';
+      const tokens = agent.tokens?.total ? `${(agent.tokens.total / 1000).toFixed(1)}k tok` : '';
+      const steps = agent.toolCalls?.length || 0;
+      console.log(`${PAD}  ${c.dim}${agent.id}${c.reset} [${statusIcon}] ${c.white}${agent.model}${c.reset} ${c.dim}(${steps} steps, ${elapsed}${tokens ? ', ' + tokens : ''})${c.reset}`);
+      const taskPreview = agent.task.length > 60 ? agent.task.slice(0, 57) + '...' : agent.task;
+      console.log(`${PAD}    ${c.dim}Task: ${taskPreview}${c.reset}`);
+    }
+    console.log('');
+    return;
+  }
+
+  // /agent status <id>
+  if (subCommand === 'status') {
+    const agentId = parts[1];
+    if (!agentId) {
+      console.log(`\n${PAD}${c.yellow}Usage: /agent status <id>${c.reset}\n`);
+      return;
+    }
+    const agent = subAgentManager.getAgent(agentId);
+    if (!agent) {
+      console.log(`\n${PAD}${c.red}Agent "${agentId}" not found.${c.reset}\n`);
+      return;
+    }
+    const elapsed = agent.completedAt
+      ? `${((agent.completedAt - agent.startedAt) / 1000).toFixed(1)}s`
+      : `${((Date.now() - agent.startedAt) / 1000).toFixed(1)}s (running)`;
+    console.log(`
+${PAD}${c.orange}Agent ${agent.id}${c.reset}
+${PAD}  Model:    ${c.white}${agent.model}${c.reset} (${agent.provider})
+${PAD}  Status:   ${agent.status}
+${PAD}  Task:     ${agent.task}
+${PAD}  Elapsed:  ${elapsed}
+${PAD}  Steps:    ${agent.toolCalls?.length || 0}
+${PAD}  Tokens:   ${agent.tokens?.total || 0} (prompt: ${agent.tokens?.prompt || 0}, completion: ${agent.tokens?.completion || 0})
+${PAD}  Depth:    ${agent.depth}
+`);
+    if (agent.toolCalls?.length > 0) {
+      console.log(`${PAD}  ${c.dim}Tool calls:${c.reset}`);
+      for (const tc of agent.toolCalls) {
+        const detail = tc.args?.path || tc.args?.pattern || tc.args?.command || tc.args?.query || '';
+        console.log(`${PAD}    ${c.dim}${tc.tool}${detail ? ' ' + detail : ''}${c.reset}`);
+      }
+      console.log('');
+    }
+    if (agent.result) {
+      const preview = agent.result.length > 500 ? agent.result.slice(0, 497) + '...' : agent.result;
+      console.log(`${PAD}  ${c.dim}Result:${c.reset}`);
+      console.log(`${PAD}  ${preview}\n`);
+    }
+    if (agent.error) {
+      console.log(`${PAD}  ${c.red}Error: ${agent.error}${c.reset}\n`);
+    }
+    return;
+  }
+
+  // /agent models
+  if (subCommand === 'models') {
+    const models = modelRegistry.list();
+    console.log(`\n${PAD}${c.orange}Available Models for Sub-Agents${c.reset}`);
+    const grouped = {};
+    for (const m of models) {
+      const provider = m.provider || 'local';
+      if (!grouped[provider]) grouped[provider] = [];
+      grouped[provider].push(m);
+    }
+    for (const [provider, providerModels] of Object.entries(grouped)) {
+      const label = PROVIDER_LABELS[provider] || provider;
+      console.log(`\n${PAD}  ${c.cyan}${label}${c.reset}`);
+      for (const m of providerModels) {
+        const key = m.provider === 'local' ? m.key : `${m.provider}:${m.key}`;
+        const active = m.active ? ` ${c.green}(active)${c.reset}` : '';
+        console.log(`${PAD}    ${c.white}${key}${c.reset}${active} ${c.dim}${m.name || ''}${c.reset}`);
+      }
+    }
+    console.log('');
+    return;
+  }
+
+  // /agent <model> <task> - spawn a sub-agent
+  const modelKey = parts[0];
+  const task = parts.slice(1).join(' ');
+  if (!task) {
+    console.log(`\n${PAD}${c.yellow}Usage: /agent <model> <task>${c.reset}`);
+    console.log(`${PAD}${c.dim}Example: /agent anthropic:claude-sonnet-4.6 review the auth flow${c.reset}\n`);
+    return;
+  }
+
+  // Resolve to verify the model exists
+  const resolved = modelRegistry.resolveModelKey(modelKey);
+  if (!resolved) {
+    console.log(`\n${PAD}${c.red}Could not resolve model "${modelKey}".${c.reset}`);
+    console.log(`${PAD}${c.dim}Use /agent models to see available models.${c.reset}\n`);
+    return;
+  }
+
+  const providerLabel = PROVIDER_LABELS[resolved.provider || 'local'] || resolved.provider || 'local';
+  console.log(`\n${PAD}${c.cyan}-- Sub-Agent [${resolved.key}] (${providerLabel}) -----${c.reset}`);
+  console.log(`${PAD}${c.dim}| Task: ${task}${c.reset}`);
+
+  // Set up UI callbacks
+  let agentStepCount = 0;
+  subAgentManager.onAgentToolCall = (agent, tool, toolArgs) => {
+    agentStepCount++;
+    const toolIcons = {
+      read_file: '> Reading', list_files: '> Listing', search_code: '> Searching',
+      create_file: '> Creating', edit_file: '> Editing', run_command: '> Running',
+      spawn_agent: '> Spawning agent'
+    };
+    const detail = toolArgs.path || toolArgs.pattern || toolArgs.command || toolArgs.query || toolArgs.model || '';
+    console.log(`${PAD}${c.dim}| ${toolIcons[tool] || '> ' + tool} ${detail}${c.reset}`);
+  };
+  subAgentManager.onAgentComplete = (agent) => {
+    const elapsed = ((agent.completedAt - agent.startedAt) / 1000).toFixed(1);
+    const tokens = agent.tokens?.total ? `${(agent.tokens.total / 1000).toFixed(1)}k tokens` : '';
+    console.log(`${PAD}${c.dim}| -- ${agent.toolCalls?.length || 0} steps --${c.reset}`);
+    console.log(`${PAD}${c.cyan}+-- Complete (${tokens}${tokens ? ', ' : ''}${elapsed}s)${c.reset}`);
+  };
+  subAgentManager.onAgentError = (agent, err) => {
+    console.log(`${PAD}${c.red}+-- Failed: ${err.message || err}${c.reset}`);
+  };
+
+  const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let spinnerIdx = 0;
+  const spinnerInterval = setInterval(() => {
+    spinnerIdx = (spinnerIdx + 1) % spinnerFrames.length;
+    process.stdout.write(`\x1b[2K\x1b[0G${PAD}${c.cyan}${spinnerFrames[spinnerIdx]} Working...${c.reset}`);
+  }, 100);
+
+  try {
+    const result = await subAgentManager.spawn(modelKey, task, { depth: 1 });
+    clearInterval(spinnerInterval);
+    process.stdout.write('\x1b[2K\x1b[0G');
+
+    if (result.error) {
+      console.log(`\n${PAD}${c.red}Error: ${result.error}${c.reset}\n`);
+    } else if (result.result) {
+      console.log(`${PAD}|`);
+      // Render result with markdown
+      const mdRenderer = new MarkdownRenderer();
+      const rendered = mdRenderer.render(result.result) + mdRenderer.flush();
+      const lines = rendered.split('\n');
+      for (const line of lines) {
+        console.log(`${PAD}${c.dim}|${c.reset} ${line}`);
+      }
+      console.log('');
+
+      // Add sub-agent result to conversation so the main model has context
+      conversationHistory.push({
+        role: 'user',
+        content: `[Sub-agent result from ${result.model || modelKey}]\nTask: ${task}`
+      });
+      conversationHistory.push({
+        role: 'assistant',
+        content: result.result
+      });
+    }
+
+    // Update token counter
+    if (result.tokens > 0 && tokenCounter) {
+      // Split roughly 70/30 for prompt/completion estimate
+      const estPrompt = Math.floor(result.tokens * 0.7);
+      const estCompletion = result.tokens - estPrompt;
+      tokenCounter.addUsage(estPrompt, estCompletion);
+    }
+
+  } catch (err) {
+    clearInterval(spinnerInterval);
+    process.stdout.write('\x1b[2K\x1b[0G');
+    console.log(`\n${PAD}${c.red}Sub-agent error: ${err.message || err}${c.reset}\n`);
+  }
+}
+
 async function sendAgenticMessage(message, images = [], rawMessage = '') {
   const markdownRenderer = new MarkdownRenderer();
   const wordWrapper = new StreamingWordWrapper(null, borderRenderer.prefix('ai'));
@@ -2681,7 +2937,8 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     search_memory: '🧠 Searching memory',
     deep_research: '🔬 Deep researching',
     web_search: '🌐 Web searching',
-    call_mcp: '🔌 Calling service'
+    call_mcp: '🔌 Calling service',
+    spawn_agent: '🤖 Spawning agent'
   };
 
   // Contextual thinking message from user input
@@ -2708,6 +2965,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
   let stepCount = 0;
 
   const updateSpinner = () => {
+    if (spinnerPaused) return; // Don't overwrite user's typing
     spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
     spinnerTick++;
     // Add elapsed time to initial thinking (before tool calls start)
@@ -2734,9 +2992,34 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     if (statusInterval) {
       clearInterval(statusInterval);
       statusInterval = null;
-      process.stdout.write('\x1b[2K\x1b[0G');
+      if (!spinnerPaused) {
+        process.stdout.write('\x1b[2K\x1b[0G');
+      }
     }
+    // If user was mid-steer when the agent finished, clean up their input
+    if (steeringInputActive && rl) {
+      rl.write(null, { ctrl: true, name: 'u' }); // Clear readline buffer
+      process.stdout.write('\x1b[2K\x1b[0G');    // Clear the steering prompt line
+      if (restorePromptFn) restorePromptFn();     // Restore normal prompt string
+    }
+    // Reset steering state
+    spinnerPaused = false;
+    steeringInputActive = false;
+    pauseSpinnerFn = null;
+    resumeSpinnerFn = null;
     if (statusBar) statusBar.render();
+  };
+
+  // Wire up pause/resume for mid-turn steering
+  pauseSpinnerFn = () => {
+    // Clear the spinner line so user can type below it
+    process.stdout.write('\x1b[2K\x1b[0G');
+  };
+  resumeSpinnerFn = () => {
+    // Re-render current status on spinner line
+    spinnerPaused = false;
+    steeringInputActive = false;
+    updateSpinner();
   };
 
   // Determine prompt - use model-specific prompt if available
@@ -2790,7 +3073,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       onToolCall: (tool, args) => {
         stepCount++;
         const toolMsg = toolMessages[tool] || '🔧 Using';
-        const detail = args.path || args.pattern || args.command || args.query || (tool === 'call_mcp' ? args.tool : '') || '';
+        const detail = args.path || args.pattern || args.command || args.query || (tool === 'call_mcp' ? args.tool : '') || (tool === 'spawn_agent' ? args.model : '') || '';
         currentStatus = detail
           ? `Step ${stepCount} · ${toolMsg} ${detail}`
           : `Step ${stepCount} · ${toolMsg}`;
@@ -2808,15 +3091,21 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           }
           // Print completed step as a permanent line
           const icon = toolMessages[tool]?.split(' ')[0] || '🔧';
-          const detail = last.args.path || last.args.pattern || last.args.command || last.args.query || (tool === 'call_mcp' ? last.args.tool : '') || '';
+          const detail = last.args.path || last.args.pattern || last.args.command || last.args.query || (tool === 'call_mcp' ? last.args.tool : '') || (tool === 'spawn_agent' ? last.args.model : '') || '';
           const label = detail || (toolMessages[tool] || tool).replace(/^\S+\s*/, '');
           const status = success === false
             ? `${c.red}✗${c.reset}`
             : `${c.green}✓${c.reset}`;
           const errInfo = (!success && last.errorMsg) ? ` ${c.red}${last.errorMsg}${c.reset}` : '';
           // Clear spinner line, print permanent step, restart spinner on next line
-          process.stdout.write(`\x1b[2K\x1b[0G`);
+          if (!spinnerPaused) {
+            process.stdout.write(`\x1b[2K\x1b[0G`);
+          }
           console.log(`${borderRenderer.prefix('tool')}${status} ${c.dim}${last.stepNum}. ${icon} ${label}${errInfo}${c.reset}`);
+          // If user is typing a steering message, re-render the steering prompt
+          if (steeringInputActive && rl) {
+            rl.prompt(true);
+          }
         }
       },
       onIntermediateContent: (text) => {
@@ -2827,8 +3116,13 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
         if (firstSentence) narration = firstSentence[0];
         if (narration.length > 120) narration = narration.slice(0, 117) + '...';
         if (narration) {
-          process.stdout.write(`\x1b[2K\x1b[0G`);
+          if (!spinnerPaused) {
+            process.stdout.write(`\x1b[2K\x1b[0G`);
+          }
           console.log(`${borderRenderer.prefix('thinking')}${c.dim}${c.cyan}> ${narration}${c.reset}`);
+          if (steeringInputActive && rl) {
+            rl.prompt(true);
+          }
         }
       },
       onToken: (token) => {
@@ -2885,7 +3179,52 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       },
       onWarning: (msg) => {
         console.log(`\n${PAD}${c.yellow}⚠ ${msg}${c.reset}`);
-      }
+      },
+      // Sub-agent support: inject spawn_agent tool when not in plan mode
+      customTools: (interactionMode !== 'plan' && subAgentManager) ? [SPAWN_AGENT_TOOL_DEF] : [],
+      customToolExecutors: subAgentManager ? new Map([
+        ['spawn_agent', async (args, opts) => {
+          // UI: show sub-agent spawning inline
+          const resolved = modelRegistry.resolveModelKey(args.model);
+          const modelLabel = resolved?.key || args.model;
+          const providerLabel = PROVIDER_LABELS[resolved?.provider || 'local'] || resolved?.provider || 'local';
+
+          process.stdout.write(`\x1b[2K\x1b[0G`);
+          console.log(`${borderRenderer.prefix('tool')}${c.cyan}> Spawning agent [${modelLabel}] (${providerLabel})${c.reset}`);
+          console.log(`${borderRenderer.prefix('tool')}${c.dim}  Task: "${args.task?.slice(0, 80) || ''}"${c.reset}`);
+
+          // Set sub-agent callbacks for inline display
+          subAgentManager.onAgentToolCall = (agent, tool, toolArgs) => {
+            const detail = toolArgs.path || toolArgs.pattern || toolArgs.command || toolArgs.query || '';
+            console.log(`${borderRenderer.prefix('tool')}${c.dim}  | > ${tool} ${detail}${c.reset}`);
+          };
+          subAgentManager.onAgentComplete = (agent) => {
+            const elapsed = ((agent.completedAt - agent.startedAt) / 1000).toFixed(1);
+            const tokens = agent.tokens?.total ? `${(agent.tokens.total / 1000).toFixed(1)}k tokens` : '';
+            const steps = agent.toolCalls?.length || 0;
+            console.log(`${borderRenderer.prefix('tool')}${c.dim}  +-- Complete (${steps} steps, ${elapsed}s${tokens ? ', ' + tokens : ''})${c.reset}`);
+          };
+          subAgentManager.onAgentError = (agent, err) => {
+            console.log(`${borderRenderer.prefix('tool')}${c.red}  +-- Failed: ${err.message || err}${c.reset}`);
+          };
+
+          const result = await subAgentManager.spawn(args.model, args.task, {
+            context: args.context,
+            readOnly: args.read_only,
+            depth: 1,
+            signal: opts.signal
+          });
+
+          // Track sub-agent tokens in session totals
+          if (result.tokens > 0 && tokenCounter) {
+            const estPrompt = Math.floor(result.tokens * 0.7);
+            const estCompletion = result.tokens - estPrompt;
+            tokenCounter.addUsage(estPrompt, estCompletion);
+          }
+
+          return result;
+        }]
+      ]) : null
     });
 
     // Use model-specific inference settings
@@ -2913,6 +3252,9 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     }
 
     stopSpinner();
+    // Clear stale midTurnSteerRequested if the run completed normally
+    // (prevents ghost steers if abort raced with completion)
+    midTurnSteerRequested = false;
     if (statusBar) {
       statusBar.stopTiming();
       statusBar.update({
@@ -3596,20 +3938,56 @@ function createReadlineInterface() {
       return;
     }
 
-    // --- Escape x2: Cancel current request ---
+    // --- Escape handling ---
     if (key.name === 'escape') {
+      // If steering input is active, cancel it and resume spinner
+      if (steeringInputActive) {
+        steeringInputActive = false;
+        spinnerPaused = false;
+        rl.write(null, { ctrl: true, name: 'u' }); // Clear typed text from readline buffer
+        process.stdout.write('\x1b[2K\x1b[0G');    // Clear the steering prompt line
+        if (restorePromptFn) restorePromptFn();     // Restore normal prompt string
+        if (resumeSpinnerFn) resumeSpinnerFn();
+        if (statusBar) statusBar.render();
+        return;
+      }
+      // Double Escape: cancel current request
       if (currentAbortController) {
         const now = Date.now();
         if (now - lastEscapeTime < 500) {
-          // Double Escape within 500ms - cancel
           currentAbortController.abort();
           lastEscapeTime = 0;
         } else {
-          // First Escape - show hint
           lastEscapeTime = now;
           process.stdout.write(`\n${PAD}${c.dim}Press Esc again to cancel${c.reset}`);
         }
       }
+      return;
+    }
+
+    // --- Mid-turn typing: pause spinner when user starts typing during active request ---
+    if (currentAbortController && !steeringInputActive && !spinnerPaused) {
+      // Printable character while agent is working - enter steering mode
+      const isPrintable = char && char.length === 1 && !key.ctrl && !key.meta;
+      if (isPrintable) {
+        spinnerPaused = true;
+        steeringInputActive = true;
+        if (pauseSpinnerFn) pauseSpinnerFn();
+        // Show steering input using readline's proper prompt mechanism.
+        // The triggering char is already in readline's line buffer (our
+        // keypress handler fires after readline's internal handler). Calling
+        // prompt() redraws the prompt prefix + rl.line, making the char visible.
+        const steerPrompt = `${PAD}${c.dim}Steer →${c.reset} `;
+        rl.setPrompt(steerPrompt);
+        process.stdout.write(`\n`);
+        rl.prompt(false);
+        if (statusBar) statusBar.render();
+        return;
+      }
+    }
+
+    // --- If steering input is active, let keystrokes go to readline normally ---
+    if (steeringInputActive) {
       return;
     }
   });
@@ -3783,6 +4161,11 @@ Examples:
     return `${borderRenderer.prefix('user')}${c.green}${modeIcon}${c.reset} ${c.dim}[${modelName}]${c.reset}${think ? ` ${c.cyan}🧠${c.reset}` : ''} ${c.dim}ctx:${c.reset}${pctColor}${pct}%${c.reset} ${c.orange}You → ${c.reset}`;
   };
 
+  // Expose prompt restoration for mid-turn steering cleanup
+  restorePromptFn = () => {
+    if (rl) rl.setPrompt(getPromptPrefix());
+  };
+
   // Build a highlighted version of the user prompt for post-submission repaint.
   // Light orange bg, dark text, no ANSI reset conflicts.
   const getHighlightedPrompt = (userText) => {
@@ -3942,22 +4325,53 @@ Examples:
     // This prevents output from commands, model switching, pickers, etc.
     // from being treated as user input.
     if (!waitingForInput) {
-      // Allow in-flight steering while a request is running.
+      // Mid-turn steering: user typed while agent was working
       if (currentAbortController) {
         const trimmed = String(input || '').trim();
+
+        // New: direct typing steering (Claude Code style)
+        if (steeringInputActive && trimmed) {
+          steeringInputActive = false;
+          spinnerPaused = false;
+          if (restorePromptFn) restorePromptFn(); // Restore normal prompt string
+          // Strip /steer prefix if they used it out of habit
+          const cleanText = trimmed.replace(/^\/steer(?:ing)?\s+/i, '');
+          if (cleanText) {
+            if (requestMidTurnSteer(cleanText)) {
+              console.log(`${PAD}${c.cyan}Steering received. Redirecting...${c.reset}\n`);
+            } else {
+              console.log(`${PAD}${c.yellow}Could not apply steering.${c.reset}\n`);
+              if (resumeSpinnerFn) resumeSpinnerFn();
+            }
+          } else {
+            // Empty after stripping prefix
+            if (resumeSpinnerFn) resumeSpinnerFn();
+          }
+          return;
+        }
+
+        // Cancelled steering (empty Enter while steering prompt is up)
+        if (steeringInputActive && !trimmed) {
+          steeringInputActive = false;
+          spinnerPaused = false;
+          if (restorePromptFn) restorePromptFn(); // Restore normal prompt string
+          process.stdout.write('\x1b[2K\x1b[0G');
+          if (resumeSpinnerFn) resumeSpinnerFn();
+          return;
+        }
+
+        // Legacy: /steer command still works without needing the typing detection
         if (trimmed) {
           const steerMatch = trimmed.match(/^\/steer(?:ing)?\s+(.+)$/i);
           if (steerMatch) {
             const steerText = steerMatch[1].trim();
             if (steerText) {
               if (requestMidTurnSteer(steerText)) {
-                console.log(`\n${PAD}${c.cyan}Steering received. Redirecting current turn...${c.reset}\n`);
+                console.log(`\n${PAD}${c.cyan}Steering received. Redirecting...${c.reset}\n`);
               } else {
-                console.log(`\n${PAD}${c.yellow}Could not apply mid-turn steering.${c.reset}\n`);
+                console.log(`\n${PAD}${c.yellow}Could not apply steering.${c.reset}\n`);
               }
             }
-          } else if (/^\/steer(?:ing)?$/i.test(trimmed)) {
-            console.log(`\n${PAD}${c.dim}Use /steer <text> during a running turn.${c.reset}\n`);
           }
         }
       }
