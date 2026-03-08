@@ -84,6 +84,8 @@ let watcher = null;
 let imageHandler = null;
 let visionAnalyzer = null;
 let showGeminiKeyPrompt = null; // assigned in createReadlineInterface (needs readline closure)
+let awaitingGeminiKey = false;
+let geminiKeyCallback = null;
 let lmStudio = null;
 let promptManager = null;
 let modelRegistry = null;
@@ -115,6 +117,25 @@ let midTurnSteerRequested = false;
 // Abort controller for cancelling requests with Escape (double-press)
 let currentAbortController = null;
 let lastEscapeTime = 0;
+
+// Truncate an ANSI-decorated string to fit within the terminal width.
+// Walks visible characters only, keeping ANSI escape sequences intact.
+function fitToTerminal(str) {
+  const cols = process.stdout.columns || 120;
+  let visible = 0;
+  let i = 0;
+  while (i < str.length) {
+    if (str[i] === '\x1b') {
+      // Skip entire ANSI escape sequence
+      const end = str.indexOf('m', i);
+      if (end !== -1) { i = end + 1; continue; }
+    }
+    visible++;
+    if (visible >= cols) return str.slice(0, i + 1) + '\x1b[0m';
+    i++;
+  }
+  return str;
+}
 
 function isDebugLoggingEnabled() {
   const raw = (process.env.RIPLEY_DEBUG || '').trim().toLowerCase();
@@ -2466,9 +2487,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
       // We'll show a brief status that doesn't disrupt the flow
     } else {
       // During initial thinking: show on current line
-      process.stdout.clearLine(0);
-      process.stdout.cursorTo(0);
-      process.stdout.write(statusText);
+      process.stdout.write(`\x1b[2K\x1b[0G${fitToTerminal(statusText)}`);
       statusLineLength = statusText.length;
     }
 
@@ -2491,10 +2510,8 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     messageIndex = 0;
     tickCount = 0;
     // Clear the thinking line and show AI label on same line
-    process.stdout.clearLine(0);
-    process.stdout.cursorTo(0);
     const aiLabel = `${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `;
-    process.stdout.write(aiLabel);
+    process.stdout.write(`\x1b[2K\x1b[0G${aiLabel}`);
     // Tell word wrapper how much of the first line is already used
     wordWrapper.currentLineLength = borderRenderer.stripAnsi(aiLabel).length;
     if (statusBar) statusBar.refresh();
@@ -2701,9 +2718,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
         displayStatus = `${currentStatus} (${elapsed}s)`;
       }
     }
-    process.stdout.clearLine(0);
-    process.stdout.cursorTo(0);
-    process.stdout.write(`${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${displayStatus}${c.reset}`);
+    process.stdout.write(`\x1b[2K\x1b[0G${fitToTerminal(`${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${displayStatus}${c.reset}`)}`);
     if (statusBar) {
       statusBar.refresh();
     }
@@ -2719,8 +2734,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     if (statusInterval) {
       clearInterval(statusInterval);
       statusInterval = null;
-      process.stdout.clearLine(0);
-      process.stdout.cursorTo(0);
+      process.stdout.write('\x1b[2K\x1b[0G');
     }
     if (statusBar) statusBar.render();
   };
@@ -2781,7 +2795,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           ? `Step ${stepCount} · ${toolMsg} ${detail}`
           : `Step ${stepCount} · ${toolMsg}`;
         updateSpinner();
-        toolCallsDisplayed.push({ tool, args });
+        toolCallsDisplayed.push({ tool, args, stepNum: stepCount });
       },
       onToolResult: (tool, success, result) => {
         if (toolCallsDisplayed.length > 0) {
@@ -2792,31 +2806,41 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           } else if (result?.error) {
             last.errorMsg = String(result.error).slice(0, 120);
           }
+          // Print completed step as a permanent line
+          const icon = toolMessages[tool]?.split(' ')[0] || '🔧';
+          const detail = last.args.path || last.args.pattern || last.args.command || last.args.query || (tool === 'call_mcp' ? last.args.tool : '') || '';
+          const label = detail || (toolMessages[tool] || tool).replace(/^\S+\s*/, '');
+          const status = success === false
+            ? `${c.red}✗${c.reset}`
+            : `${c.green}✓${c.reset}`;
+          const errInfo = (!success && last.errorMsg) ? ` ${c.red}${last.errorMsg}${c.reset}` : '';
+          // Clear spinner line, print permanent step, restart spinner on next line
+          process.stdout.write(`\x1b[2K\x1b[0G`);
+          console.log(`${borderRenderer.prefix('tool')}${status} ${c.dim}${last.stepNum}. ${icon} ${label}${errInfo}${c.reset}`);
+        }
+      },
+      onIntermediateContent: (text) => {
+        // Surface model narration between tool rounds
+        // Grab first sentence or first 120 chars as a brief status line
+        let narration = text.replace(/<[^>]+>/g, '').trim();
+        const firstSentence = narration.match(/^[^.!?\n]+[.!?]?/);
+        if (firstSentence) narration = firstSentence[0];
+        if (narration.length > 120) narration = narration.slice(0, 117) + '...';
+        if (narration) {
+          process.stdout.write(`\x1b[2K\x1b[0G`);
+          console.log(`${borderRenderer.prefix('thinking')}${c.dim}${c.cyan}> ${narration}${c.reset}`);
         }
       },
       onToken: (token) => {
-        // First token: stop spinner, print header, start streaming
+        // First token: stop spinner, print separator, start streaming
         if (!streamingStarted) {
           streamingStarted = true;
           stopSpinner();
 
-          // Show tool call summary
+          // Brief summary line if there were steps
           if (toolCallsDisplayed.length > 0) {
             const stepWord = toolCallsDisplayed.length === 1 ? 'step' : 'steps';
-            console.log(`${borderRenderer.prefix('tool')}${c.dim}┌─ ${toolCallsDisplayed.length} ${stepWord} completed${c.reset}`);
-            for (const tc of toolCallsDisplayed) {
-              const icon = toolMessages[tc.tool]?.split(' ')[0] || '🔧';
-              const detail = tc.args.path || tc.args.pattern || tc.args.command || tc.args.query || (tc.tool === 'call_mcp' ? tc.args.tool : '') || '';
-              const label = detail || (toolMessages[tc.tool] || tc.tool).replace(/^\S+\s*/, '');
-              if (tc.success === false) {
-                const err = tc.errorMsg ? ` ${c.red}${tc.errorMsg}${c.reset}` : '';
-                console.log(`${borderRenderer.prefix('tool')}${c.dim}│ ${c.red}✗${c.reset}${c.dim} ${icon} ${label}${err}${c.reset}`);
-              } else {
-                const preview = tc.mcpPreview ? ` ${c.dim}→ ${tc.mcpPreview.slice(0, 80)}${tc.mcpPreview.length > 80 ? '…' : ''}${c.reset}` : '';
-                console.log(`${borderRenderer.prefix('tool')}${c.dim}│ ${c.green}✓${c.reset}${c.dim} ${icon} ${label}${preview}${c.reset}`);
-              }
-            }
-            console.log(`${borderRenderer.prefix('tool')}${c.dim}└─${c.reset}`);
+            console.log(`${borderRenderer.prefix('tool')}${c.dim}── ${toolCallsDisplayed.length} ${stepWord} completed ──${c.reset}`);
           }
 
           const agenticAiLabel = `${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `;
@@ -3524,8 +3548,11 @@ function createReadlineInterface() {
         ask: 'Question-only mode (no operations)'
       };
 
-      process.stdout.write('\n');
+      // Clear current input line before showing mode change
+      process.stdout.write('\x1b[2K\x1b[0G');
       console.log(`${modeColors[interactionMode]}  ${modeIcons[interactionMode]} Mode: ${interactionMode.toUpperCase()}${c.reset} ${c.dim}- ${modeDescriptions[interactionMode]}${c.reset}`);
+      // Clear any text the user had typed so the fresh prompt is clean
+      rl.write(null, { ctrl: true, name: 'u' });
       repromptWithStatus();
       return;
     }
@@ -3559,8 +3586,7 @@ function createReadlineInterface() {
     // --- Escape: Cancel Gemini key prompt if active ---
     if (key.name === 'escape' && awaitingGeminiKey) {
       awaitingGeminiKey = false;
-      process.stdout.clearLine(0);
-      process.stdout.cursorTo(0);
+      process.stdout.write('\x1b[2K\x1b[0G');
       console.log(`${PAD}${c.dim}Cancelled${c.reset}\n`);
       if (geminiKeyCallback) {
         geminiKeyCallback(false);
@@ -3812,8 +3838,6 @@ Examples:
   let pasteBuffer = [];
   let pasteTimer = null;
   let waitingForInput = false;
-  let awaitingGeminiKey = false;
-  let geminiKeyCallback = null;
 
   showGeminiKeyPrompt = (callback) => {
     awaitingGeminiKey = true;
