@@ -20,13 +20,13 @@ A coding agent with local + remote model support. Run local LM Studio models, or
 ## Installation
 
 ```bash
-npm install -g git+https://github.com/mrchevyceleb/ripley-code.git
+npm install -g ripley-code
 ```
 
 ### Upgrade
 
 ```bash
-npm install -g git+https://github.com/mrchevyceleb/ripley-code.git
+npm install -g ripley-code@latest
 ```
 
 ## Usage

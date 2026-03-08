@@ -34,10 +34,10 @@ No middleware. No AI Router. One process.
 ## Installation
 
 ```bash
-npm install -g git+https://github.com/mrchevyceleb/ripley-code.git
+npm install -g ripley-code
 ```
 
-Same command to upgrade.
+Upgrade: `npm install -g ripley-code@latest`
 
 ## Development Setup (IMPORTANT - Do This First)
 
