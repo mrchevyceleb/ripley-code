@@ -43,6 +43,7 @@ const { ProviderStore, PROVIDERS } = require('./lib/providerStore');
 const { ProviderManager, PROVIDER_LABELS } = require('./lib/providerManager');
 const { AgenticRunner, TOOLS, READ_ONLY_TOOLS, setMcpClient } = require('./lib/agenticRunner');
 const { SubAgentManager, SPAWN_AGENT_TOOL_DEF } = require('./lib/subAgentManager');
+const { HookManager, REFINE_SYSTEM_PROMPT } = require('./lib/hookManager');
 const McpClient = require('./lib/mcpClient');
 const { pick } = require('./lib/interactivePicker');
 const StatusBar = require('./lib/statusBar');
@@ -94,6 +95,7 @@ let providerStore = null;
 let providerManager = null;
 let mcpClient = null;
 let subAgentManager = null;
+let hookManager = null;
 let statusBar = null;
 let inlineComplete = null;
 let conversationHistory = [];
@@ -130,7 +132,9 @@ let restorePromptFn = null;         // set by main(), restores normal readline p
 // Truncate an ANSI-decorated string to fit within the terminal width.
 // Walks visible characters only, keeping ANSI escape sequences intact.
 function fitToTerminal(str) {
-  const cols = process.stdout.columns || 120;
+  // Reserve 2 columns as safety margin for wide chars (emoji = 2 cols)
+  const cols = (process.stdout.columns || 120) - 2;
+  if (cols < 10) return str;
   let visible = 0;
   let i = 0;
   while (i < str.length) {
@@ -139,9 +143,12 @@ function fitToTerminal(str) {
       const end = str.indexOf('m', i);
       if (end !== -1) { i = end + 1; continue; }
     }
-    visible++;
-    if (visible >= cols) return str.slice(0, i + 1) + '\x1b[0m';
-    i++;
+    // Emoji and wide chars take 2 columns. Check surrogate pairs and common wide ranges.
+    const code = str.codePointAt(i);
+    const charWidth = (code > 0x1F000 || (code >= 0x2600 && code <= 0x27BF) || (code >= 0x2B50 && code <= 0x2B55) || code > 0xFFFF) ? 2 : 1;
+    visible += charWidth;
+    if (visible >= cols) return str.slice(0, i) + '\x1b[0m';
+    i += (code > 0xFFFF) ? 2 : 1; // Skip surrogate pair
   }
   return str;
 }
@@ -303,7 +310,8 @@ ${P}${c.yellow}/implement${c.reset}          Execute the saved plan from .ripley
 ${P}${c.yellow}/ask${c.reset}                Toggle ASK mode (questions only, no file ops)
 ${P}${c.yellow}/mode${c.reset}               Show current mode
 ${P}${c.yellow}/yolo${c.reset}               Toggle YOLO mode (auto-apply all changes)
-${P}${c.yellow}/agent [model] [task]${c.reset} Spawn sub-agent or show agent commands
+${P}${c.yellow}/agent [model] [task]${c.reset} Spawn sub-agent (no args = interactive picker)
+${P}${c.yellow}/hooks${c.reset}               Manage lifecycle hooks (add, edit, remove, toggle, test)
 ${P}${c.yellow}/steer <text>${c.reset}       Steer next turn (or interrupt + redirect current turn)
 ${P}${c.yellow}/model [name]${c.reset}      Show/switch model
 ${P}${c.yellow}/model search <query>${c.reset} Search OpenRouter models and add one
@@ -475,6 +483,45 @@ function initProject() {
     config,
     projectDir
   });
+
+  // Initialize Hook Manager
+  hookManager = new HookManager({
+    config,
+    subAgentManager,
+    projectDir,
+    refineFn: async (naturalLanguage, modelKey, systemPrompt) => {
+      try {
+        const resolved = modelRegistry.resolveModelKey(modelKey || 'local:current');
+        if (!resolved) return naturalLanguage;
+        const client = await providerManager.getClientForModel(resolved);
+        const result = await client.chat([
+          { role: 'system', content: systemPrompt || REFINE_SYSTEM_PROMPT },
+          { role: 'user', content: naturalLanguage }
+        ], { model: resolved.id, temperature: 0.3, maxTokens: 2000 });
+        return result.choices?.[0]?.message?.content || naturalLanguage;
+      } catch {
+        return naturalLanguage;
+      }
+    },
+    onHookStart: (hookDef) => {
+      console.log(`${PAD}${c.cyan}> Hook: ${hookDef.name}${c.reset}`);
+    },
+    onHookComplete: (hookDef, result) => {
+      const preview = result.length > 80 ? result.slice(0, 77) + '...' : result;
+      console.log(`${PAD}${c.green}+ Hook complete: ${hookDef.name}${c.reset} ${c.dim}${preview.split('\n')[0]}${c.reset}`);
+    },
+    onHookError: (hookDef, err) => {
+      console.log(`${PAD}${c.red}x Hook failed: ${hookDef.name} - ${err.message || err}${c.reset}`);
+    },
+    onHookProgress: (hookDef, agentLabel, turn, maxTurns) => {
+      console.log(`${PAD}  ${c.dim}Agent ${agentLabel} (turn ${turn}/${maxTurns})...${c.reset}`);
+    }
+  });
+  const hookList = hookManager.listAll();
+  if (hookList.length > 0) {
+    const enabledCount = hookList.filter(h => h.enabled).length;
+    console.log(`${PAD}${c.cyan}✓${c.reset} Hooks: ${enabledCount} active ${c.dim}(/hooks to manage)${c.reset}`);
+  }
 
   console.log(`${PAD}${c.cyan}✓${c.reset} Mode: always agentic ${c.dim}(reads files on demand, streams final response)${c.reset}`);
 }
@@ -1672,6 +1719,10 @@ async function handleCommand(input) {
       await handleAgentCommand(args);
       return true;
 
+    case '/hooks':
+      await handleHooksCommand(args);
+      return true;
+
     case '/work':
     case '/code':
       interactionMode = 'work';
@@ -2703,6 +2754,170 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
 }
 
 // =============================================================================
+// HOOKS COMMAND HANDLER
+// =============================================================================
+
+async function handleHooksCommand(args) {
+  if (!hookManager) {
+    console.log(`\n${PAD}${c.red}Hook manager not initialized.${c.reset}\n`);
+    return;
+  }
+
+  const parts = (args || '').trim().split(/\s+/);
+  const subCommand = parts[0]?.toLowerCase();
+
+  // /hooks (no args) or /hooks list
+  if (!subCommand || subCommand === 'list') {
+    const hooks = hookManager.listAll();
+    if (hooks.length === 0) {
+      console.log(`\n${PAD}${c.dim}No hooks configured. Use /hooks add to create one.${c.reset}\n`);
+      return;
+    }
+    console.log(`\n${PAD}${c.orange}Hooks (${hooks.length})${c.reset}`);
+    for (const h of hooks) {
+      const status = h.enabled ? `${c.green}on${c.reset}` : `${c.red}off${c.reset}`;
+      const scope = h._scope === 'project' ? `${c.yellow}project${c.reset}` : `${c.cyan}global${c.reset}`;
+
+      if (h.agentA) {
+        // New multi-agent format
+        const hasB = !!h.agentB;
+        const label = hasB ? `A: ${h.agentA.model} / B: ${h.agentB.model}` : `agent: ${h.agentA.model}`;
+        const turns = hasB ? ` ${h.maxTurns || 3} turns` : '';
+        console.log(`${PAD}  [${status}] ${c.white}${h.name}${c.reset} ${c.dim}(${h.hookPoint}, ${h.trigger || 'always'}, ${label}${turns})${c.reset} [${scope}]`);
+      } else if (h.agent) {
+        // Legacy single-agent format
+        console.log(`${PAD}  [${status}] ${c.white}${h.name}${c.reset} ${c.dim}(${h.hookPoint}, ${h.trigger || 'always'}, agent: ${h.agent})${c.reset} [${scope}]`);
+      } else {
+        // Shell hook
+        console.log(`${PAD}  [${status}] ${c.white}${h.name}${c.reset} ${c.dim}(${h.hookPoint}, ${h.trigger || 'always'}, cmd: ${h.command})${c.reset} [${scope}]`);
+      }
+    }
+    console.log('');
+    return;
+  }
+
+  // /hooks add - interactive wizard
+  if (subCommand === 'add') {
+    console.log(`\n${PAD}${c.orange}Add Hook${c.reset}\n`);
+    const result = await hookManager.runAddWizard(pick, askQuestion, modelRegistry);
+    if (result) {
+      const scopeLabel = result.scope === 'project' ? 'project' : 'global';
+      console.log(`\n${PAD}${c.green}Hook "${result.hookDef.name}" added to ${result.hookPoint} (${scopeLabel}).${c.reset}\n`);
+    } else {
+      console.log(`${PAD}${c.dim}Cancelled.${c.reset}\n`);
+    }
+    return;
+  }
+
+  // /hooks remove <name>
+  if (subCommand === 'remove' || subCommand === 'rm') {
+    const name = parts.slice(1).join(' ');
+    if (!name) {
+      console.log(`\n${PAD}${c.yellow}Usage: /hooks remove <name>${c.reset}\n`);
+      return;
+    }
+    const removed = hookManager.removeHook(name);
+    if (removed) {
+      console.log(`\n${PAD}${c.green}Hook "${name}" removed.${c.reset}\n`);
+    } else {
+      console.log(`\n${PAD}${c.red}Hook "${name}" not found.${c.reset}\n`);
+    }
+    return;
+  }
+
+  // /hooks toggle <name>
+  if (subCommand === 'toggle') {
+    const name = parts.slice(1).join(' ');
+    if (!name) {
+      console.log(`\n${PAD}${c.yellow}Usage: /hooks toggle <name>${c.reset}\n`);
+      return;
+    }
+    const newState = hookManager.toggleHook(name);
+    if (newState === null) {
+      console.log(`\n${PAD}${c.red}Hook "${name}" not found.${c.reset}\n`);
+    } else {
+      console.log(`\n${PAD}${c.green}Hook "${name}": ${newState ? 'enabled' : 'disabled'}${c.reset}\n`);
+    }
+    return;
+  }
+
+  // /hooks edit [name]
+  if (subCommand === 'edit') {
+    const name = parts.slice(1).join(' ') || null;
+    console.log(`\n${PAD}${c.orange}Edit Hook${c.reset}\n`);
+    const result = await hookManager.runEditWizard(pick, askQuestion, modelRegistry, name);
+    if (result) {
+      console.log(`\n${PAD}${c.green}Hook "${result.hookName}" updated.${c.reset}\n`);
+    } else {
+      console.log(`${PAD}${c.dim}No changes made.${c.reset}\n`);
+    }
+    return;
+  }
+
+  // /hooks test <name>
+  if (subCommand === 'test') {
+    const name = parts.slice(1).join(' ');
+    if (!name) {
+      console.log(`\n${PAD}${c.yellow}Usage: /hooks test <name>${c.reset}\n`);
+      return;
+    }
+    const hooks = hookManager.listAll();
+    const hook = hooks.find(h => h.name === name);
+    if (!hook) {
+      console.log(`\n${PAD}${c.red}Hook "${name}" not found.${c.reset}\n`);
+      return;
+    }
+    console.log(`\n${PAD}${c.cyan}Testing hook "${name}"...${c.reset}`);
+    try {
+      const result = await hookManager.runSingleHook(name, {
+        response: 'Test response',
+        files: ['test.js'],
+        error: hook.trigger === 'hasErrors' ? new Error('Test error') : null,
+        commandRan: hook.trigger === 'commandRan'
+      });
+      if (result) {
+        if (result.error) {
+          console.log(`${PAD}${c.red}Error: ${result.error}${c.reset}`);
+        } else {
+          console.log(`${PAD}${c.green}Result:${c.reset}`);
+          const allLines = result.result.split('\n');
+          const lines = allLines.slice(0, 10);
+          for (const line of lines) {
+            console.log(`${PAD}  ${line}`);
+          }
+          if (allLines.length > 10) {
+            console.log(`${PAD}  ${c.dim}...(${allLines.length - 10} more lines)${c.reset}`);
+          }
+        }
+      } else {
+        console.log(`${PAD}${c.dim}Hook not found.${c.reset}`);
+      }
+    } catch (err) {
+      console.log(`${PAD}${c.red}Test failed: ${err.message}${c.reset}`);
+    }
+    console.log('');
+    return;
+  }
+
+  // Default: show help
+  console.log(`
+${PAD}${c.orange}Hook System${c.reset}
+${PAD}${c.dim}Automated actions at lifecycle points.${c.reset}
+
+${PAD}${c.yellow}/hooks${c.reset}                  List all hooks
+${PAD}${c.yellow}/hooks add${c.reset}              Create a hook (with AI-refined instructions)
+${PAD}${c.yellow}/hooks edit [name]${c.reset}      Edit an existing hook
+${PAD}${c.yellow}/hooks remove <name>${c.reset}    Remove a hook by name
+${PAD}${c.yellow}/hooks toggle <name>${c.reset}    Enable/disable a hook
+${PAD}${c.yellow}/hooks test <name>${c.reset}      Test-fire a hook
+
+${PAD}${c.dim}Hook points: beforeTurn, afterTurn, afterWrite, afterCommand, onError${c.reset}
+${PAD}${c.dim}Hook types: Prompt (AI-configured) | Agent A/B (manual) | Shell (command)${c.reset}
+${PAD}${c.dim}Scopes: Global (~/.ripley/hooks.json) or Project (.ripley/hooks.json)${c.reset}
+`);
+}
+
+// =============================================================================
 // SUB-AGENT COMMAND HANDLER
 // =============================================================================
 
@@ -2712,19 +2927,68 @@ async function handleAgentCommand(args) {
     return;
   }
 
-  const parts = (args || '').trim().split(/\s+/);
-  const subCommand = parts[0]?.toLowerCase();
+  let parts = (args || '').trim().split(/\s+/);
+  let subCommand = parts[0]?.toLowerCase();
 
-  // /agent (no args) - show help
+  // /agent (no args) - interactive mode
   if (!subCommand) {
+    // Show interactive model picker
+    const models = modelRegistry.list();
+    const grouped = {};
+    for (const m of models) {
+      const provider = m.provider || 'local';
+      if (!grouped[provider]) grouped[provider] = [];
+      grouped[provider].push(m);
+    }
+    const modelItems = [];
+    for (const [provider, providerModels] of Object.entries(grouped)) {
+      for (const m of providerModels) {
+        const key = m.provider === 'local' ? m.key : `${m.provider}:${m.key}`;
+        modelItems.push({
+          key,
+          label: key,
+          description: m.name || '',
+          active: m.active
+        });
+      }
+    }
+
+    if (modelItems.length === 0) {
+      console.log(`\n${PAD}${c.yellow}No models available. Use /connect to add a provider.${c.reset}\n`);
+      return;
+    }
+
+    console.log('');
+    const modelChoice = await pick(modelItems, { title: 'Select model for sub-agent' });
+    if (!modelChoice) {
+      console.log(`${PAD}${c.dim}Cancelled.${c.reset}\n`);
+      return;
+    }
+
+    const taskInput = await askQuestion(`${PAD}${c.yellow}Task: ${c.reset}`);
+    if (!taskInput || !taskInput.trim()) {
+      console.log(`${PAD}${c.dim}No task provided. Cancelled.${c.reset}\n`);
+      return;
+    }
+
+    // Reuse the spawn logic below
+    parts = [modelChoice.key, ...taskInput.trim().split(/\s+/)];
+    subCommand = parts[0]?.toLowerCase();
+    // Fall through to spawn logic at the bottom
+  }
+
+  // /agent help
+  if (subCommand === 'help') {
     console.log(`
 ${PAD}${c.orange}Sub-Agent System${c.reset}
 ${PAD}${c.dim}Spawn sub-agents on any connected model/provider.${c.reset}
 
+${PAD}${c.yellow}/agent${c.reset}                    Interactive model picker + task prompt
 ${PAD}${c.yellow}/agent <model> <task>${c.reset}      Spawn a sub-agent
 ${PAD}${c.yellow}/agent list${c.reset}                 List all session agents
 ${PAD}${c.yellow}/agent status <id>${c.reset}           Show agent details
 ${PAD}${c.yellow}/agent models${c.reset}               List available models
+${PAD}${c.yellow}/agent help${c.reset}                 Show this help
 
 ${PAD}${c.dim}Model format: "provider:alias" (e.g., anthropic:claude-sonnet-4.6, local:current)${c.reset}
 ${PAD}${c.dim}AI can also spawn agents via the spawn_agent tool during conversations.${c.reset}
@@ -3064,16 +3328,46 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     reserveTokens: 64
   }));
 
+  // beforeTurn hooks
+  if (hookManager) {
+    try {
+      const hookResults = await hookManager.runHooks('beforeTurn', {
+        message,
+        conversationHistory
+      });
+      for (const hr of hookResults) {
+        if (hr.result && hr.inject) {
+          queueSteeringMessage(hr.result);
+        }
+      }
+      // Re-append if new steering was queued by hooks
+      if (hookResults.some(hr => hr.result)) {
+        appendQueuedSteeringMessages(messages);
+      }
+    } catch {
+      // Hook failures never break the main flow
+    }
+  }
+
   startSpinner();
   if (statusBar) statusBar.startTiming();
 
   try {
     const activeClient = await getActiveClient();
     const runner = new AgenticRunner(activeClient, {
+      onFileWrite: hookManager ? (filePath, action) => {
+        hookManager.runHooks('afterWrite', { file: filePath, files: [filePath] }).catch(() => {});
+      } : null,
+      onCommandComplete: hookManager ? (command, result) => {
+        hookManager.runHooks('afterCommand', { command, commandRan: true }).catch(() => {});
+      } : null,
       onToolCall: (tool, args) => {
         stepCount++;
         const toolMsg = toolMessages[tool] || '🔧 Using';
-        const detail = args.path || args.pattern || args.command || args.query || (tool === 'call_mcp' ? args.tool : '') || (tool === 'spawn_agent' ? args.model : '') || '';
+        let detail = args.path || args.pattern || args.command || args.query || (tool === 'call_mcp' ? args.tool : '') || (tool === 'spawn_agent' ? args.model : '') || '';
+        // Truncate detail to prevent spinner line from wrapping past terminal width
+        const maxDetail = Math.max(20, (process.stdout.columns || 120) - 30);
+        if (detail.length > maxDetail) detail = detail.slice(0, maxDetail - 3) + '...';
         currentStatus = detail
           ? `Step ${stepCount} · ${toolMsg} ${detail}`
           : `Step ${stepCount} · ${toolMsg}`;
@@ -3091,7 +3385,9 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           }
           // Print completed step as a permanent line
           const icon = toolMessages[tool]?.split(' ')[0] || '🔧';
-          const detail = last.args.path || last.args.pattern || last.args.command || last.args.query || (tool === 'call_mcp' ? last.args.tool : '') || (tool === 'spawn_agent' ? last.args.model : '') || '';
+          let detail = last.args.path || last.args.pattern || last.args.command || last.args.query || (tool === 'call_mcp' ? last.args.tool : '') || (tool === 'spawn_agent' ? last.args.model : '') || '';
+          const maxLen = Math.max(20, (process.stdout.columns || 120) - 20);
+          if (detail.length > maxLen) detail = detail.slice(0, maxLen - 3) + '...';
           const label = detail || (toolMessages[tool] || tool).replace(/^\S+\s*/, '');
           const status = success === false
             ? `${c.red}✗${c.reset}`
@@ -3119,7 +3415,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           if (!spinnerPaused) {
             process.stdout.write(`\x1b[2K\x1b[0G`);
           }
-          console.log(`${borderRenderer.prefix('thinking')}${c.dim}${c.cyan}> ${narration}${c.reset}`);
+          console.log(`${borderRenderer.prefix('thinking')}${c.cyan}> ${narration}${c.reset}`);
           if (steeringInputActive && rl) {
             rl.prompt(true);
           }
@@ -3282,6 +3578,24 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       });
     }
 
+    // afterTurn hooks
+    if (hookManager && fullResponse) {
+      try {
+        const hookResults = await hookManager.runHooks('afterTurn', {
+          response: fullResponse,
+          files: runner.getWrittenFiles(),
+          conversationHistory
+        });
+        for (const hr of hookResults) {
+          if (hr.result && hr.inject) {
+            queueSteeringMessage(hr.result);
+          }
+        }
+      } catch (hookErr) {
+        // Hook failures never break the main flow
+      }
+    }
+
   } catch (error) {
     stopSpinner();
     currentAbortController = null;
@@ -3293,6 +3607,14 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       }
       console.log(`\n\n${c.yellow}⚠ Request cancelled${c.reset}\n`);
       return;
+    }
+    // onError hooks (non-abort errors)
+    if (hookManager) {
+      try {
+        await hookManager.runHooks('onError', { error });
+      } catch {
+        // Hook failures never break the main flow
+      }
     }
     throw error;
   }
@@ -3820,20 +4142,31 @@ function createReadlineInterface() {
     if (statusBar) statusBar.render();
   };
 
-  // Pre-handle Tab/Right accept so readline completer can see justAccepted first.
+  // Pre-handle keypress BEFORE readline: clear ghost text, accept on Tab/Right.
+  // This fires before readline's internal handler, so the ghost is erased
+  // before readline redraws or moves the cursor.
   process.stdin.prependListener('keypress', (char, key) => {
     if (!key) return;
     if (!inlineComplete) return;
 
-    if (key.name === 'tab' && !key.shift && inlineComplete.hasGhost()) {
-      const ghost = inlineComplete.accept(true);
-      if (ghost) rl.write(ghost);
-      return;
-    }
+    if (inlineComplete.hasGhost()) {
+      // Erase ghost text from terminal (cursor is before the ghost)
+      process.stdout.write('\x1b[K');
 
-    if (key.name === 'right' && inlineComplete.hasGhost()) {
-      const ghost = inlineComplete.accept(false);
-      if (ghost) rl.write(ghost);
+      if (key.name === 'tab' && !key.shift) {
+        const ghost = inlineComplete.accept(true);
+        if (ghost) rl.write(ghost);
+        return;
+      }
+
+      if (key.name === 'right') {
+        const ghost = inlineComplete.accept(false);
+        if (ghost) rl.write(ghost);
+        return;
+      }
+
+      // Any other key: just clear ghost state, readline handles the key normally
+      inlineComplete.clearGhost();
     }
   });
 
@@ -3841,16 +4174,23 @@ function createReadlineInterface() {
   process.stdin.on('keypress', async (char, key) => {
     if (!key) return;
 
-    // --- Clear ghost on any other key, then re-suggest after a tick ---
-    if (inlineComplete.hasGhost()) {
-      inlineComplete.clearGhost();
-    }
-    // Schedule ghost suggestion for after readline processes this key
+    // Ghost was already cleared in prependListener. Re-suggest after readline processes key.
     if (key.name !== 'return' && key.name !== 'escape' && !key.ctrl) {
       setImmediate(() => {
         if (!rl.line) return;
+        // Only show ghost when cursor is at end of line
+        if (rl.cursor !== rl.line.length) return;
         const ghost = inlineComplete.suggest(rl.line);
-        if (ghost) inlineComplete.renderGhost(ghost);
+        if (ghost) {
+          inlineComplete.renderGhost(ghost);
+          // Render dim ghost text after cursor, then move cursor back
+          const cols = process.stdout.columns || 120;
+          const available = cols - rl.cursor - 10; // rough margin for prompt
+          if (available > 0) {
+            const show = ghost.length > available ? ghost.slice(0, available) : ghost;
+            process.stdout.write(`\x1b[2m${show}\x1b[0m\x1b[${show.length}D`);
+          }
+        }
       });
     }
 
