@@ -470,8 +470,18 @@ function initProject() {
     console.log(`${PAD}${c.dim}○ Vision disabled (paste an image with Alt+V to set up, or load a vision model)${c.reset}`);
   }
 
-  // Initialize MCP client
-  const mcpUrl = config.get('mcpUrl') || process.env.MCP_SERVER_URL || null;
+  // Initialize MCP client (project config -> global config -> env var)
+  let mcpUrl = config.get('mcpUrl');
+  if (!mcpUrl) {
+    const globalConfigPath = path.join(os.homedir(), '.ripley', 'config.json');
+    try {
+      if (fs.existsSync(globalConfigPath)) {
+        const globalConfig = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
+        mcpUrl = globalConfig.mcpUrl;
+      }
+    } catch {}
+  }
+  mcpUrl = mcpUrl || process.env.MCP_SERVER_URL || null;
   mcpClient = new McpClient(mcpUrl ? { url: mcpUrl } : {});
   setMcpClient(mcpClient);
 
@@ -1461,7 +1471,7 @@ async function handleCommand(input) {
       tokenCounter.resetSession();
       imageHandler.clearPending();
       if (statusBar) {
-        statusBar.update({ contextPct: 0, contextTokens: 0, sessionIn: 0, sessionOut: 0 });
+        statusBar.update({ sessionIn: 0, sessionOut: 0 });
         statusBar.reinstall();
       }
       refreshIdleContextEstimate();
@@ -1532,6 +1542,16 @@ async function handleCommand(input) {
       console.log(`${PAD}${c.dim}  Steering: ${steeringEnabled() ? 'ON' : 'OFF'} (${queuedSteeringMessages.length} pending)${c.reset}`);
       console.log(`${PAD}${c.dim}  Streaming: ${config.get('streamingEnabled') ? 'ON' : 'OFF'}${c.reset}`);
       console.log(`${PAD}${c.dim}  Watch mode: ${watcher.isEnabled() ? 'ON' : 'OFF'}${c.reset}`);
+      const ctxWindowLimit = modelRegistry.getContextLimit();
+      const ctxWindowUsed = projectedContextTokens > 0
+        ? projectedContextTokens
+        : estimateNextTurnContextTokens();
+      const ctxWindowPct = contextPercentForTokens(ctxWindowUsed, ctxWindowLimit);
+      console.log(`${PAD}${c.dim}  ────────────────────────────${c.reset}`);
+      console.log(`${PAD}${c.dim}  Context window: ~${ctxWindowUsed.toLocaleString()} / ${ctxWindowLimit.toLocaleString()} tokens (${ctxWindowPct}%)${c.reset}`);
+      if (ctxWindowPct >= 80) {
+        console.log(`${PAD}${c.yellow}  ⚠ Context window is ${ctxWindowPct}% full${c.reset}`);
+      }
       console.log();
       return true;
 
@@ -3230,6 +3250,11 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     agenticThinking = 'Thinking...';
   }
 
+  // Reset steering state from any previous run to prevent stale flags
+  // from suppressing the spinner or leaving ghost prompts.
+  spinnerPaused = false;
+  steeringInputActive = false;
+
   const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let spinnerIndex = 0;
   let statusInterval = null;
@@ -3574,6 +3599,10 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     }
     console.log('\n');
 
+    // Clear abort controller before processAIResponse so the plan review
+    // prompt isn't hijacked by the mid-turn steering keypress handler.
+    currentAbortController = null;
+
     if (agenticSteeringCount > 0) {
       clearSteeringMessages();
     }
@@ -3731,13 +3760,11 @@ async function processAIResponse(reply, originalMessage, options = {}) {
     tokenCounter.trackUsage(originalMessage, reply);
   }
 
-  // Update status bar with token info
+  // Update status bar with session token info (context values set by refreshIdleContextEstimate)
   if (statusBar) {
     statusBar.update({
       sessionIn: tokenCounter.sessionTokens?.input || 0,
-      sessionOut: tokenCounter.sessionTokens?.output || 0,
-      contextTokens: lastKnownTokens,
-      contextPct: Math.round((lastKnownTokens / modelRegistry.getContextLimit()) * 100)
+      sessionOut: tokenCounter.sessionTokens?.output || 0
     });
   }
 
@@ -4247,12 +4274,13 @@ function createReadlineInterface() {
         ask: 'Question-only mode (no operations)'
       };
 
-      // Clear current input line before showing mode change
+      // Preserve the user's in-progress text across the mode switch
+      const savedInput = rl.line || '';
       process.stdout.write('\x1b[2K\x1b[0G');
       console.log(`${modeColors[interactionMode]}  ${modeIcons[interactionMode]} Mode: ${interactionMode.toUpperCase()}${c.reset} ${c.dim}- ${modeDescriptions[interactionMode]}${c.reset}`);
-      // Clear any text the user had typed so the fresh prompt is clean
       rl.write(null, { ctrl: true, name: 'u' });
       repromptWithStatus();
+      if (savedInput) rl.write(savedInput);
       return;
     }
 
