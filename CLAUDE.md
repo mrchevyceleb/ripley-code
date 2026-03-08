@@ -31,6 +31,14 @@ No middleware. No AI Router. One process.
 | `lib/visionAnalyzer.js` | Local vision + Gemini fallback |
 | `lib/config.js` | Config management (lmStudioUrl, activeModel, activePrompt) |
 
+## Installation
+
+```bash
+npm install -g git+https://github.com/mrchevyceleb/ripley-code.git
+```
+
+Same command to upgrade.
+
 ## Development Setup (IMPORTANT - Do This First)
 
 Before making any changes, ensure the global `ripley` command is symlinked to this repo so edits are instantly live:
