@@ -1,6 +1,9 @@
 {
   "name": "ripley-code",
   "version": "1.0.0",
+  "bin": {
+    "ripley": "./ripley.js"
+  },
   "scripts": {
     "postinstall": "node scripts/createRipleyDir.js"
   },
