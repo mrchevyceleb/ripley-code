@@ -5,7 +5,7 @@
     "ripley": "./ripley.js"
   },
   "scripts": {
-    "postinstall": "node scripts/createRipleyDir.js"
+    "postinstall": "node scripts/createRipleyDir.js || echo ripley: skipped dir creation"
   },
   "dependencies": {}
 }
