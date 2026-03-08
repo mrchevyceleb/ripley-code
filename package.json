@@ -1,11 +1,32 @@
 {
   "name": "ripley-code",
   "version": "1.0.0",
+  "description": "AI coding agent CLI powered by local LM Studio models and remote providers (Anthropic, OpenAI, OpenRouter)",
+  "main": "ripley.js",
   "bin": {
     "ripley": "./ripley.js"
   },
   "scripts": {
     "postinstall": "node scripts/createRipleyDir.js || echo ripley: skipped dir creation"
+  },
+  "keywords": [
+    "ai",
+    "coding",
+    "agent",
+    "cli",
+    "lm-studio",
+    "local-llm",
+    "code-assistant"
+  ],
+  "author": "Matt Johnston",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mrchevyceleb/ripley-code.git"
+  },
+  "homepage": "https://github.com/mrchevyceleb/ripley-code",
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "diff": "^8.0.3",
