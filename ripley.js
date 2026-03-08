@@ -1746,6 +1746,7 @@ async function handleCommand(input) {
     case '/work':
     case '/code':
       interactionMode = 'work';
+      if (statusBar) statusBar.update({ mode: 'work' });
       console.log(`\n${PAD}${c.green}  ✓ Switched to WORK mode${c.reset}`);
       console.log(`${PAD}${c.dim}  File operations and commands will be executed normally.${c.reset}\n`);
       return true;
@@ -1753,10 +1754,12 @@ async function handleCommand(input) {
     case '/plan':
       if (interactionMode === 'plan') {
         interactionMode = 'work';
+        if (statusBar) statusBar.update({ mode: 'work' });
         console.log(`\n${PAD}${c.green}  ✓ Switched to WORK mode${c.reset}`);
         console.log(`${PAD}${c.dim}  File operations and commands will be executed normally.${c.reset}\n`);
       } else {
         interactionMode = 'plan';
+        if (statusBar) statusBar.update({ mode: 'plan' });
         console.log(`\n${PAD}${c.cyan}📋 PLAN MODE: ON${c.reset}`);
         console.log(`${PAD}${c.dim}  AI explores the codebase and builds a structured plan.${c.reset}`);
         console.log(`${PAD}${c.dim}  After the plan, choose: implement, reject, or refine.${c.reset}\n`);
@@ -1779,9 +1782,11 @@ async function handleCommand(input) {
         // Switch to code mode and send the plan for implementation
         const prevMode = interactionMode;
         interactionMode = 'work';
+        if (statusBar) statusBar.update({ mode: 'work' });
         console.log(`\n${PAD}${c.cyan}🚀 Implementing plan...${c.reset}\n`);
         await sendMessage(`Please implement this plan:\n\n${planContent}\n\nApply the changes now using <file_operation> tags.`);
         interactionMode = prevMode;
+        if (statusBar) statusBar.update({ mode: prevMode });
       } else {
         console.log(`${PAD}${c.dim}Plan not implemented.${c.reset}\n`);
       }
@@ -1790,10 +1795,12 @@ async function handleCommand(input) {
     case '/ask':
       if (interactionMode === 'ask') {
         interactionMode = 'work';
+        if (statusBar) statusBar.update({ mode: 'work' });
         console.log(`\n${PAD}${c.green}  ✓ Switched to WORK mode${c.reset}`);
         console.log(`${PAD}${c.dim}  File operations and commands will be executed normally.${c.reset}\n`);
       } else {
         interactionMode = 'ask';
+        if (statusBar) statusBar.update({ mode: 'ask' });
         console.log(`\n${c.magenta}  💬 ASK MODE: ON${c.reset}`);
         console.log(`${PAD}${c.dim}  Question-only mode - AI will answer questions without generating code operations.${c.reset}`);
         console.log(`${PAD}${c.dim}  Use /ask again to switch back to work mode.${c.reset}\n`);
@@ -2590,7 +2597,10 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
   const startThinking = () => {
     process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[0]} ${thinkingMessage}${c.reset}`);
     statusInterval = setInterval(updateStatus, 100);
-    if (statusBar) statusBar.render();
+    if (statusBar) {
+      statusBar.setInputHint('Type to steer \u00b7 Esc\u00d72 to cancel');
+      statusBar.render();
+    }
   };
 
   // Transition to generating mode (first token received)
@@ -2621,7 +2631,10 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     steeringInputActive = false;
     pauseSpinnerFn = null;
     resumeSpinnerFn = null;
-    if (statusBar) statusBar.render();
+    if (statusBar) {
+      statusBar.setInputHint('');
+      statusBar.render();
+    }
   };
 
   // Wire up pause/resume for mid-turn steering (streaming path)
@@ -3286,7 +3299,10 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
   const startSpinner = () => {
     process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[0]} ${currentStatus}${c.reset}`);
     statusInterval = setInterval(updateSpinner, 100);
-    if (statusBar) statusBar.render();
+    if (statusBar) {
+      statusBar.setInputHint('Type to steer \u00b7 Esc\u00d72 to cancel');
+      statusBar.render();
+    }
   };
 
   const stopSpinner = () => {
@@ -3308,7 +3324,10 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     steeringInputActive = false;
     pauseSpinnerFn = null;
     resumeSpinnerFn = null;
-    if (statusBar) statusBar.render();
+    if (statusBar) {
+      statusBar.setInputHint('');
+      statusBar.render();
+    }
   };
 
   // Wire up pause/resume for mid-turn steering
@@ -3795,6 +3814,7 @@ async function processAIResponse(reply, originalMessage, options = {}) {
       if (trimmed === '' || trimmed === 'y' || trimmed === 'yes') {
         // Implement the plan
         interactionMode = 'work';
+        if (statusBar) statusBar.update({ mode: 'work' });
         console.log(`\n${PAD}${c.cyan}🚀 Implementing plan...${c.reset}\n`);
         await sendMessage(`Please implement this plan:\n\n${reply}\n\nApply the changes now using <file_operation> tags.`);
         reviewing = false;
@@ -4265,6 +4285,7 @@ function createReadlineInterface() {
       const currentIndex = modes.indexOf(interactionMode);
       const nextIndex = (currentIndex + 1) % modes.length;
       interactionMode = modes[nextIndex];
+      if (statusBar) statusBar.update({ mode: interactionMode });
 
       const modeColors = { work: c.green, plan: c.cyan, ask: c.magenta };
       const modeIcons = { work: '🔧', plan: '📋', ask: '💬' };
@@ -4482,7 +4503,8 @@ Examples:
       modelName: `${initialParts.providerLabel}: ${initialModel?.name || '?'}`,
       modelId: modelRegistry.getCurrentId() || '',
       contextLimit: modelRegistry.getContextLimit(),
-      mcpConnected: mcpIsConnected
+      mcpConnected: mcpIsConnected,
+      mode: interactionMode
     });
     refreshIdleContextEstimate();
   }
