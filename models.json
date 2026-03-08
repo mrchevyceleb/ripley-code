@@ -9,6 +9,7 @@
       "supportsThinking": true,
       "preserveReasoning": true,
       "prompt": "code-agent-gptoss",
+      "thinkingBudgets": { "low": 1024, "medium": 4096, "high": 16384 },
       "inferenceSettings": {
         "temperature": 1,
         "topP": 1
@@ -50,6 +51,7 @@
       "contextLimit": 32768,
       "supportsThinking": true,
       "prompt": "code-agent-qwen",
+      "thinkingBudgets": { "low": 1024, "medium": 4096, "high": 12288 },
       "inferenceSettings": {
         "temperature": 0.7,
         "topP": 0.8
@@ -70,6 +72,7 @@
       "contextLimit": 71680,
       "supportsThinking": true,
       "prompt": "code-agent-glm",
+      "thinkingBudgets": { "low": 1024, "medium": 4096, "high": 16384 },
       "inferenceSettings": {
         "temperature": 0.7,
         "topP": 1,
@@ -91,6 +94,7 @@
       "contextLimit": 124604,
       "supportsThinking": true,
       "prompt": "code-agent-qwen",
+      "thinkingBudgets": { "low": 512, "medium": 2048, "high": 8192 },
       "inferenceSettings": {
         "temperature": 0.8,
         "topP": 0.9,
@@ -114,6 +118,7 @@
       "contextLimit": 32768,
       "supportsThinking": true,
       "prompt": "code-agent-nemotron",
+      "thinkingBudgets": { "low": 1024, "medium": 4096, "high": 12288 },
       "inferenceSettings": {
         "temperature": 0.6,
         "topP": 0.95

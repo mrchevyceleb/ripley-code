@@ -137,8 +137,18 @@ let interactionMode = 'work';
 // Active prompt name (default: 'base', user can switch with /prompt)
 let activePrompt = 'base';
 
-// Thinking mode: when enabled, models that support it will reason before answering
-let thinkingMode = false;
+// Thinking level: 'off' | 'low' | 'medium' | 'high'
+// Controls budget_tokens sent to models that support thinking
+let thinkingLevel = 'off';
+const THINKING_LEVELS = ['off', 'low', 'medium', 'high'];
+const DEFAULT_THINKING_BUDGETS = { low: 1024, medium: 4096, high: 16384 };
+
+function getThinkingBudget() {
+  if (thinkingLevel === 'off') return 0;
+  const model = modelRegistry?.getCurrentModel();
+  const budgets = model?.thinkingBudgets || DEFAULT_THINKING_BUDGETS;
+  return budgets[thinkingLevel] ?? DEFAULT_THINKING_BUDGETS[thinkingLevel] ?? 0;
+}
 
 // Queued steering inputs to inject before the next request(s)
 let queuedSteeringMessages = [];
@@ -168,7 +178,7 @@ function buildPromptPrefix() {
     : estimateNextTurnContextTokens();
   const pct = contextPercentForTokens(usedTokens, limit);
   const modeIcon = { work: '\u{1F527}', plan: '\u{1F4CB}', ask: '\u{1F4AC}' }[interactionMode] || '\u{1F527}';
-  const think = (thinkingMode && modelRegistry?.currentSupportsThinking()) ? ` ${c.cyan}\u{1F9E0}${c.reset}` : '';
+  const think = (thinkingLevel !== 'off' && modelRegistry?.currentSupportsThinking()) ? ` ${c.cyan}\u{1F9E0}${thinkingLevel}${c.reset}` : '';
   let pctColor = c.green;
   if (pct >= 80) pctColor = c.red;
   else if (pct >= 50) pctColor = c.yellow;
@@ -347,7 +357,7 @@ ${P}${c.yellow}/sessions${c.reset}           List saved sessions
 ${P}${c.yellow}/context${c.reset}            Show context size & tokens
 ${P}${c.yellow}/tokens${c.reset}             Show token usage this session
 ${P}${c.yellow}/compact${c.reset}            Toggle compact mode
-${P}${c.yellow}/think${c.reset}              Toggle thinking mode (gpt-oss reasons before answering)
+${P}${c.yellow}/think [level]${c.reset}       Set thinking level: off, low, medium, high (cycles if no arg)
 
 ${P}${c.orange}${c.dim}Modes:${c.reset}
 ${P}${c.yellow}/work${c.reset}               Switch to WORK mode (execute operations)
@@ -1619,20 +1629,32 @@ async function handleCommand(input) {
       console.log();
       return true;
 
-    case '/think':
+    case '/think': {
       if (!modelRegistry.currentSupportsThinking()) {
         console.log(`\n${PAD}${c.yellow}⚠ Current model (${modelRegistry.getCurrent()}) doesn't support thinking mode.${c.reset}`);
         console.log(`${PAD}${c.dim}Switch to a model with reasoning support via /model.${c.reset}\n`);
-      } else {
-        thinkingMode = !thinkingMode;
-        const thinkIcon = thinkingMode ? `${c.cyan}🧠 ON${c.reset}` : `${c.dim}OFF${c.reset}`;
-        console.log(`\n${PAD}${c.green}  ✓ Thinking mode: ${thinkIcon}${c.reset}`);
-        if (thinkingMode) {
-          console.log(`${PAD}${c.dim}gpt-oss will reason before responding. Slower but smarter.${c.reset}`);
-        }
-        console.log();
+        return true;
       }
+      const requested = args.trim().toLowerCase();
+      if (requested && THINKING_LEVELS.includes(requested)) {
+        thinkingLevel = requested;
+      } else if (requested) {
+        console.log(`\n${PAD}${c.yellow}⚠ Invalid level "${requested}". Use: ${THINKING_LEVELS.join(', ')}${c.reset}\n`);
+        return true;
+      } else {
+        const idx = THINKING_LEVELS.indexOf(thinkingLevel);
+        thinkingLevel = THINKING_LEVELS[(idx + 1) % THINKING_LEVELS.length];
+      }
+      if (thinkingLevel === 'off') {
+        console.log(`\n${PAD}${c.green}  ✓ Thinking: ${c.dim}OFF${c.reset}`);
+      } else {
+        const budget = getThinkingBudget();
+        console.log(`\n${PAD}${c.green}  ✓ Thinking: ${c.cyan}🧠 ${thinkingLevel.toUpperCase()}${c.reset} ${c.dim}(${budget} budget tokens)${c.reset}`);
+        console.log(`${PAD}${c.dim}Model will reason before responding. Slower but smarter.${c.reset}`);
+      }
+      console.log();
       return true;
+    }
 
     case '/steer':
     case '/steering': {
@@ -2773,6 +2795,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     temperature: streamInferenceSettings.temperature,
     topP: streamInferenceSettings.topP,
     repeatPenalty: streamInferenceSettings.repeatPenalty,
+    thinking: (thinkingLevel !== 'off' && modelRegistry.currentSupportsThinking()) ? getThinkingBudget() : false,
     signal: currentAbortController.signal,
     reasoningEffort: streamModelMeta?.reasoningEffort
   });
@@ -3799,7 +3822,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       temperature: inferenceSettings.temperature,
       topP: inferenceSettings.topP,
       repeatPenalty: inferenceSettings.repeatPenalty,
-      thinking: thinkingMode && modelRegistry.currentSupportsThinking(),
+      thinkingBudget: (thinkingLevel !== 'off' && modelRegistry.currentSupportsThinking()) ? getThinkingBudget() : 0,
       signal: currentAbortController.signal,
       reasoningEffort: agenticModelMeta?.reasoningEffort,
       tools: interactionMode === 'plan' ? READ_ONLY_TOOLS : undefined,
@@ -4788,7 +4811,7 @@ Examples:
       : estimateNextTurnContextTokens();
     const pct = contextPercentForTokens(usedTokens, limit);
     const modeIcon = { work: '🔧', plan: '📋', ask: '💬' }[interactionMode] || '🔧';
-    const think = (thinkingMode && modelRegistry.currentSupportsThinking()) ? ' 🧠' : '';
+    const think = (thinkingLevel !== 'off' && modelRegistry.currentSupportsThinking()) ? ` 🧠${thinkingLevel}` : '';
     return { modelName, pct, modeIcon, think };
   };
 
