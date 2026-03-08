@@ -45,7 +45,7 @@ const { AgenticRunner, TOOLS, READ_ONLY_TOOLS, setMcpClient } = require('./lib/a
 const { SubAgentManager, SPAWN_AGENT_TOOL_DEF } = require('./lib/subAgentManager');
 const { HookManager, REFINE_SYSTEM_PROMPT } = require('./lib/hookManager');
 const McpClient = require('./lib/mcpClient');
-const { pick } = require('./lib/interactivePicker');
+const { pick, pickToggle, isPickerActive } = require('./lib/interactivePicker');
 const StatusBar = require('./lib/statusBar');
 const borderRenderer = require('./lib/borderRenderer');
 const InlineComplete = require('./lib/inlineComplete');
@@ -2773,25 +2773,37 @@ async function handleHooksCommand(args) {
       console.log(`\n${PAD}${c.dim}No hooks configured. Use /hooks add to create one.${c.reset}\n`);
       return;
     }
-    console.log(`\n${PAD}${c.orange}Hooks (${hooks.length})${c.reset}`);
-    for (const h of hooks) {
-      const status = h.enabled ? `${c.green}on${c.reset}` : `${c.red}off${c.reset}`;
-      const scope = h._scope === 'project' ? `${c.yellow}project${c.reset}` : `${c.cyan}global${c.reset}`;
 
+    // Build items for interactive toggle
+    const toggleItems = hooks.map(h => {
+      let desc;
       if (h.agentA) {
-        // New multi-agent format
         const hasB = !!h.agentB;
         const label = hasB ? `A: ${h.agentA.model} / B: ${h.agentB.model}` : `agent: ${h.agentA.model}`;
-        const turns = hasB ? ` ${h.maxTurns || 3} turns` : '';
-        console.log(`${PAD}  [${status}] ${c.white}${h.name}${c.reset} ${c.dim}(${h.hookPoint}, ${h.trigger || 'always'}, ${label}${turns})${c.reset} [${scope}]`);
+        const turns = hasB ? `, ${h.maxTurns || 3} turns` : '';
+        desc = `${h.hookPoint}, ${h.trigger || 'always'}, ${label}${turns}`;
       } else if (h.agent) {
-        // Legacy single-agent format
-        console.log(`${PAD}  [${status}] ${c.white}${h.name}${c.reset} ${c.dim}(${h.hookPoint}, ${h.trigger || 'always'}, agent: ${h.agent})${c.reset} [${scope}]`);
+        desc = `${h.hookPoint}, ${h.trigger || 'always'}, agent: ${h.agent}`;
       } else {
-        // Shell hook
-        console.log(`${PAD}  [${status}] ${c.white}${h.name}${c.reset} ${c.dim}(${h.hookPoint}, ${h.trigger || 'always'}, cmd: ${h.command})${c.reset} [${scope}]`);
+        desc = `${h.hookPoint}, ${h.trigger || 'always'}, cmd: ${h.command}`;
       }
-    }
+      return {
+        key: h.name,
+        description: desc,
+        meta: h._scope === 'project' ? 'project' : 'global',
+        enabled: h.enabled !== false,
+        _hookName: h.name
+      };
+    });
+
+    await pickToggle(toggleItems, {
+      title: `Hooks (${hooks.length})`,
+      onToggle: (item, newEnabled) => {
+        const result = hookManager.toggleHook(item._hookName);
+        if (result === null) return false;
+        return true;
+      }
+    });
     console.log('');
     return;
   }
@@ -4147,6 +4159,7 @@ function createReadlineInterface() {
   // before readline redraws or moves the cursor.
   process.stdin.prependListener('keypress', (char, key) => {
     if (!key) return;
+    if (isPickerActive()) return;
     if (!inlineComplete) return;
 
     if (inlineComplete.hasGhost()) {
@@ -4173,6 +4186,10 @@ function createReadlineInterface() {
   // Handle keypress events: history, mode cycling, clipboard, escape, inline complete
   process.stdin.on('keypress', async (char, key) => {
     if (!key) return;
+
+    // When a picker UI (pick/pickToggle) is active, it owns all keypress
+    // events. Don't let the global handler interfere with history, escape, etc.
+    if (isPickerActive()) return;
 
     // Ghost was already cleared in prependListener. Re-suggest after readline processes key.
     if (key.name !== 'return' && key.name !== 'escape' && !key.ctrl) {
@@ -4446,7 +4463,15 @@ Examples:
 
   // Create readline first, THEN install status bar (readline resets terminal state)
   rl = createReadlineInterface();
-  if (statusBar) statusBar.install();
+  if (statusBar) {
+    statusBar.install();
+    // Clamp cursor into the scroll region so the first prompt isn't hidden
+    // behind the status bar (the startup banner may have pushed it past the
+    // scroll boundary).
+    const rows = process.stdout.rows || 24;
+    const scrollEnd = Math.max(1, rows - (4 /* BAR_HEIGHT */ + 1 /* GAP_ROWS */));
+    process.stdout.write(`\x1b[${scrollEnd};1H`);
+  }
 
   // Handle one-shot mode (but not for special commands like init, yolo)
   const specialArgs = ['init', 'yolo', '--yolo'];
@@ -4745,14 +4770,26 @@ Examples:
   };
 
   // Repaint prompt + bar after terminal resize when idle.
+  // The StatusBar already handles its own resize (scroll region + bar repaint).
+  // We only need to refresh the readline prompt on the current line, clearing
+  // the old one first so we don't leave duplicate prompt ghosts on screen.
   let resizeRefreshTimer = null;
   process.stdout.on('resize', () => {
     if (resizeRefreshTimer) clearTimeout(resizeRefreshTimer);
     resizeRefreshTimer = setTimeout(() => {
       if (!waitingForInput) return;
       if (currentAbortController) return;
-      showPrompt();
-    }, 30);
+      // Clear the current line (old prompt text) before redrawing
+      readline.clearLine(process.stdout, 0);
+      readline.cursorTo(process.stdout, 0);
+      // Refresh context estimate and prompt prefix, but skip reinstalling the
+      // status bar (its own resize handler already did that).
+      refreshIdleContextEstimate();
+      const prefix = getPromptPrefix();
+      rl.setPrompt(prefix);
+      rl.prompt(true);  // preserveCursor: keep any text the user was typing
+      if (statusBar) statusBar.render();
+    }, 100);
   });
 
   runStartupUiSelfCheck();
