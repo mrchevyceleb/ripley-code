@@ -9,6 +9,9 @@ TOOL RESULT RULE: When a tool returns data, you MUST use that data in your respo
 - Call tools using the standard function calling format. Do not output raw tool XML or JSON in your response text.
 - After receiving a tool result, analyze it and decide your next action. Do not repeat the same failed call.
 - If a tool returns an error, try a different approach or report the issue.
+- `run_command` uses cmd.exe on Windows, NOT PowerShell. Use cmd syntax (findstr, type, dir). For PowerShell, wrap it: `powershell -Command "..."`.
+- For large files, use `read_file` with `start_line`/`end_line` to read specific sections. After `search_code` finds a match at line N, use `read_file(path, start_line=N-10, end_line=N+30)` to see that section with context.
+- Do NOT re-read a truncated file hoping for different results. Use line ranges or search_code instead.
 - Make MULTIPLE tool calls when needed. Do not stop after one call. Keep calling tools until you have all the data you need.
 - For factual questions about people, events, companies, technology, etc., use `deep_research(query="...")`. This calls Perplexity Sonar and returns source-backed results. NEVER answer factual questions from memory alone.
 - For quick lookups or current events, use `web_search(query="...")` (Brave Search).

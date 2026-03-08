@@ -153,6 +153,28 @@ let promptDuringWork = false;       // true when prompt is shown below spinner d
 let renderWorkingPrompt = null;     // function to re-render spinner + prompt during work
 let restorePromptFn = null;         // set by main(), restores normal readline prompt
 
+// Build the full user prompt prefix (model, context%, mode) for use anywhere
+function buildPromptPrefix() {
+  const currentModel = modelRegistry?.getCurrentModel();
+  const parts = modelDisplayParts(currentModel);
+  const modelName = currentModel
+    ? (currentModel.key.startsWith(`${parts.provider}:`)
+      ? currentModel.key
+      : `${parts.provider}:${currentModel.key}`)
+    : '?';
+  const limit = modelRegistry?.getContextLimit() || 0;
+  const usedTokens = projectedContextTokens > 0
+    ? projectedContextTokens
+    : estimateNextTurnContextTokens();
+  const pct = contextPercentForTokens(usedTokens, limit);
+  const modeIcon = { work: '\u{1F527}', plan: '\u{1F4CB}', ask: '\u{1F4AC}' }[interactionMode] || '\u{1F527}';
+  const think = (thinkingMode && modelRegistry?.currentSupportsThinking()) ? ` ${c.cyan}\u{1F9E0}${c.reset}` : '';
+  let pctColor = c.green;
+  if (pct >= 80) pctColor = c.red;
+  else if (pct >= 50) pctColor = c.yellow;
+  return `${borderRenderer.prefix('user')}${c.green}${modeIcon}${c.reset} ${c.dim}[${modelName}]${c.reset}${think} ${c.dim}ctx:${c.reset}${pctColor}${pct}%${c.reset} ${c.orange}You \u2192 ${c.reset}`;
+}
+
 // Truncate an ANSI-decorated string to fit within the terminal width.
 // Walks visible characters only, keeping ANSI escape sequences intact.
 function fitToTerminal(str) {
@@ -1489,25 +1511,34 @@ async function handleCommand(input) {
     case '/clear':
       conversationHistory = [];
       lastKnownTokens = 0;
-      projectedContextTokens = 0;
       contextBuilder.clearFiles();
       contextBuilder.loadPriorityFiles();
       tokenCounter.resetSession();
       imageHandler.clearPending();
+      setContextEstimate(0);
       if (statusBar) {
         statusBar.update({ sessionIn: 0, sessionOut: 0 });
         statusBar.reinstall();
       }
+      console.clear();
       refreshIdleContextEstimate();
+      if (rl) {
+        rl.setPrompt(buildPromptPrefix());
+        rl.prompt(false);
+      }
       console.log(`\n${PAD}${c.green}  ✓ Cleared conversation and reset context${c.reset}\n`);
       return true;
 
     case '/clearhistory':
       conversationHistory = [];
       lastKnownTokens = 0;
-      projectedContextTokens = 0;
       tokenCounter.resetSession();
+      setContextEstimate(0);
       refreshIdleContextEstimate();
+      if (rl) {
+        rl.setPrompt(buildPromptPrefix());
+        rl.prompt(false);
+      }
       console.log(`\n${PAD}${c.green}  ✓ Cleared conversation history${c.reset}\n`);
       return true;
 
@@ -2631,13 +2662,13 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     statusInterval = setInterval(updateStatus, 100);
     // Show prompt below spinner so user can type at any time
     promptDuringWork = true;
-    const steerPrefix = `${PAD}${c.dim}>${c.reset} `;
-    rl.setPrompt(steerPrefix);
+    rl.setPrompt(buildPromptPrefix());
     process.stdout.write('\n');
     rl.prompt(false);
     // Store re-render function for use by handleLine/flushSteerPasteBuffer
     renderWorkingPrompt = () => {
       process.stdout.write(`${fitToTerminal(getStreamSpinnerText())}\n`);
+      rl.setPrompt(buildPromptPrefix());
       rl.prompt(false);
       if (statusBar) statusBar.render();
     };
@@ -3352,13 +3383,13 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     statusInterval = setInterval(updateSpinner, 100);
     // Show prompt below spinner so user can type at any time
     promptDuringWork = true;
-    const steerPrefix = `${PAD}${c.dim}>${c.reset} `;
-    rl.setPrompt(steerPrefix);
+    rl.setPrompt(buildPromptPrefix());
     process.stdout.write('\n');
     rl.prompt(false);
     // Store re-render function for use by handleLine/flushSteerPasteBuffer
     renderWorkingPrompt = () => {
       process.stdout.write(`${fitToTerminal(getSpinnerText())}\n`);
+      rl.setPrompt(buildPromptPrefix());
       rl.prompt(false);
       if (statusBar) statusBar.render();
     };
@@ -4547,7 +4578,7 @@ function createReadlineInterface() {
       // Double Escape: cancel current request
       if (currentAbortController) {
         const now = Date.now();
-        if (now - lastEscapeTime < 500) {
+        if (now - lastEscapeTime < 1000) {
           // Clean up pending question if any
           if (pendingHumanQuestion) {
             pendingHumanQuestion.resolve('(cancelled)');
@@ -4555,6 +4586,14 @@ function createReadlineInterface() {
           }
           currentAbortController.abort();
           lastEscapeTime = 0;
+          // Force-clear spinner + prompt lines in case abort doesn't propagate immediately
+          if (promptDuringWork) {
+            process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+            promptDuringWork = false;
+            renderWorkingPrompt = null;
+            if (restorePromptFn) restorePromptFn();
+            if (statusBar) { statusBar.setInputHint(''); statusBar.render(); }
+          }
         } else {
           lastEscapeTime = now;
           // Show cancel hint in the status bar gap row
