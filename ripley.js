@@ -51,6 +51,32 @@ const borderRenderer = require('./lib/borderRenderer');
 const InlineComplete = require('./lib/inlineComplete');
 
 // =============================================================================
+// ASK_HUMAN TOOL DEFINITION
+// =============================================================================
+
+const ASK_HUMAN_TOOL_DEF = {
+  type: 'function',
+  function: {
+    name: 'ask_human',
+    description: 'Ask the user a question and wait for their response. Use this when you need clarification, want to confirm an approach, or need the user to make a decision before proceeding. The user will see your question and can type a response.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: {
+          type: 'string',
+          description: 'The question to ask the user. Be specific and concise.'
+        }
+      },
+      required: ['question']
+    }
+  }
+};
+
+// Resolver for pending ask_human interactions.
+// Set by the ask_human executor, resolved by handleLine when user answers.
+let pendingHumanQuestion = null; // { resolve, question }
+
+// =============================================================================
 // CONFIGURATION
 // =============================================================================
 
@@ -122,11 +148,9 @@ let midTurnSteerRequested = false;
 let currentAbortController = null;
 let lastEscapeTime = 0;
 
-// Mid-turn input: user can type while agent is working (like Claude Code)
-let spinnerPaused = false;          // true when user is typing mid-turn
-let steeringInputActive = false;    // true when steering prompt is visible
-let pauseSpinnerFn = null;          // set by sendAgenticMessage, called from keypress
-let resumeSpinnerFn = null;         // set by sendAgenticMessage, called after steer/cancel
+// Mid-turn input: prompt is always visible during AI work (like Claude Code)
+let promptDuringWork = false;       // true when prompt is shown below spinner during AI work
+let renderWorkingPrompt = null;     // function to re-render spinner + prompt during work
 let restorePromptFn = null;         // set by main(), restores normal readline prompt
 
 // Truncate an ANSI-decorated string to fit within the terminal width.
@@ -2557,7 +2581,6 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
 
   // Update status line (shown during both thinking and generating)
   const updateStatus = () => {
-    if (spinnerPaused) return; // Don't overwrite user's typing
     spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
     tickCount++;
 
@@ -2577,10 +2600,12 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     const tokenInfo = isGenerating ? ` ${c.dim}(${tokenCount} tokens)${c.reset}` : '';
     const statusText = `${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${currentMessage}${c.reset}${tokenInfo}`;
 
-    // Save cursor, move to status line, clear and write, restore cursor
     if (isGenerating) {
       // During generation: show status on same line, don't interfere with output
-      // We'll show a brief status that doesn't disrupt the flow
+    } else if (promptDuringWork) {
+      // Prompt is below spinner - use save/restore to update spinner line above
+      process.stdout.write(`\x1b[s\x1b[A\x1b[2K\x1b[0G${fitToTerminal(statusText)}\x1b[u`);
+      statusLineLength = statusText.length;
     } else {
       // During initial thinking: show on current line
       process.stdout.write(`\x1b[2K\x1b[0G${fitToTerminal(statusText)}`);
@@ -2593,12 +2618,31 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     }
   };
 
-  // Start the status animation
+  // Get current spinner text for re-rendering
+  const getStreamSpinnerText = () => {
+    const elapsed = Math.floor(tickCount / 10);
+    const msg = elapsed >= 3 ? `${thinkingMessage} (${elapsed}s)` : thinkingMessage;
+    return `${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${msg}${c.reset}`;
+  };
+
+  // Start the status animation with always-visible prompt below spinner
   const startThinking = () => {
     process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[0]} ${thinkingMessage}${c.reset}`);
     statusInterval = setInterval(updateStatus, 100);
+    // Show prompt below spinner so user can type at any time
+    promptDuringWork = true;
+    const steerPrefix = `${PAD}${c.dim}>${c.reset} `;
+    rl.setPrompt(steerPrefix);
+    process.stdout.write('\n');
+    rl.prompt(false);
+    // Store re-render function for use by handleLine/flushSteerPasteBuffer
+    renderWorkingPrompt = () => {
+      process.stdout.write(`${fitToTerminal(getStreamSpinnerText())}\n`);
+      rl.prompt(false);
+      if (statusBar) statusBar.render();
+    };
     if (statusBar) {
-      statusBar.setInputHint('Type to steer \u00b7 Esc\u00d72 to cancel');
+      statusBar.setInputHint('Esc\u00d72 to cancel');
       statusBar.render();
     }
   };
@@ -2608,9 +2652,17 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     isGenerating = true;
     messageIndex = 0;
     tickCount = 0;
-    // Clear the thinking line and show AI label on same line
+    // Clear prompt line and spinner line, then show AI label
+    if (promptDuringWork) {
+      process.stdout.write('\x1b[2K\x1b[0G');           // Clear prompt line
+      process.stdout.write('\x1b[A\x1b[2K\x1b[0G');     // Move up, clear spinner line
+      promptDuringWork = false;
+      renderWorkingPrompt = null;
+    } else {
+      process.stdout.write('\x1b[2K\x1b[0G');
+    }
     const aiLabel = `${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `;
-    process.stdout.write(`\x1b[2K\x1b[0G${aiLabel}`);
+    process.stdout.write(aiLabel);
     // Tell word wrapper how much of the first line is already used
     wordWrapper.currentLineLength = borderRenderer.stripAnsi(aiLabel).length;
     if (statusBar) statusBar.refresh();
@@ -2621,30 +2673,19 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
       clearInterval(statusInterval);
       statusInterval = null;
     }
-    // Clean up steering state if user was mid-steer when response arrived
-    if (steeringInputActive && rl) {
-      rl.write(null, { ctrl: true, name: 'u' });
-      process.stdout.write('\x1b[2K\x1b[0G');
+    // Clean up prompt-during-work if it was still active
+    if (promptDuringWork && rl) {
+      rl.write(null, { ctrl: true, name: 'u' }); // Clear any typed text
+      process.stdout.write('\x1b[2K\x1b[0G');     // Clear prompt line
+      process.stdout.write('\x1b[A\x1b[2K\x1b[0G'); // Move up, clear spinner line
       if (restorePromptFn) restorePromptFn();
     }
-    spinnerPaused = false;
-    steeringInputActive = false;
-    pauseSpinnerFn = null;
-    resumeSpinnerFn = null;
+    promptDuringWork = false;
+    renderWorkingPrompt = null;
     if (statusBar) {
       statusBar.setInputHint('');
       statusBar.render();
     }
-  };
-
-  // Wire up pause/resume for mid-turn steering (streaming path)
-  pauseSpinnerFn = () => {
-    process.stdout.write('\x1b[2K\x1b[0G');
-  };
-  resumeSpinnerFn = () => {
-    spinnerPaused = false;
-    steeringInputActive = false;
-    updateStatus();
   };
 
   // Determine which prompt to use - mirror agentic path's model-specific logic
@@ -3247,7 +3288,8 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     deep_research: '🔬 Deep researching',
     web_search: '🌐 Web searching',
     call_mcp: '🔌 Calling service',
-    spawn_agent: '🤖 Spawning agent'
+    spawn_agent: '🤖 Spawning agent',
+    ask_human: '💬 Asking you'
   };
 
   // Contextual thinking message from user input
@@ -3263,10 +3305,9 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     agenticThinking = 'Thinking...';
   }
 
-  // Reset steering state from any previous run to prevent stale flags
-  // from suppressing the spinner or leaving ghost prompts.
-  spinnerPaused = false;
-  steeringInputActive = false;
+  // Reset prompt-during-work state from any previous run
+  promptDuringWork = false;
+  renderWorkingPrompt = null;
 
   const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let spinnerIndex = 0;
@@ -3278,11 +3319,8 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
   let streamedTokenCount = 0;
   let stepCount = 0;
 
-  const updateSpinner = () => {
-    if (spinnerPaused) return; // Don't overwrite user's typing
-    spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
-    spinnerTick++;
-    // Add elapsed time to initial thinking (before tool calls start)
+  // Get current spinner text for re-rendering after layout changes
+  const getSpinnerText = () => {
     let displayStatus = currentStatus;
     if (stepCount === 0) {
       const elapsed = Math.floor(spinnerTick / 10);
@@ -3290,7 +3328,20 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
         displayStatus = `${currentStatus} (${elapsed}s)`;
       }
     }
-    process.stdout.write(`\x1b[2K\x1b[0G${fitToTerminal(`${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${displayStatus}${c.reset}`)}`);
+    return `${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${displayStatus}${c.reset}`;
+  };
+
+  const updateSpinner = () => {
+    spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
+    spinnerTick++;
+    const statusText = fitToTerminal(getSpinnerText());
+
+    if (promptDuringWork) {
+      // Prompt is below spinner - use save/restore to update spinner line above
+      process.stdout.write(`\x1b[s\x1b[A\x1b[2K\x1b[0G${statusText}\x1b[u`);
+    } else {
+      process.stdout.write(`\x1b[2K\x1b[0G${statusText}`);
+    }
     if (statusBar) {
       statusBar.refresh();
     }
@@ -3299,8 +3350,20 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
   const startSpinner = () => {
     process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[0]} ${currentStatus}${c.reset}`);
     statusInterval = setInterval(updateSpinner, 100);
+    // Show prompt below spinner so user can type at any time
+    promptDuringWork = true;
+    const steerPrefix = `${PAD}${c.dim}>${c.reset} `;
+    rl.setPrompt(steerPrefix);
+    process.stdout.write('\n');
+    rl.prompt(false);
+    // Store re-render function for use by handleLine/flushSteerPasteBuffer
+    renderWorkingPrompt = () => {
+      process.stdout.write(`${fitToTerminal(getSpinnerText())}\n`);
+      rl.prompt(false);
+      if (statusBar) statusBar.render();
+    };
     if (statusBar) {
-      statusBar.setInputHint('Type to steer \u00b7 Esc\u00d72 to cancel');
+      statusBar.setInputHint('Esc\u00d72 to cancel');
       statusBar.render();
     }
   };
@@ -3309,37 +3372,22 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     if (statusInterval) {
       clearInterval(statusInterval);
       statusInterval = null;
-      if (!spinnerPaused) {
-        process.stdout.write('\x1b[2K\x1b[0G');
-      }
     }
-    // If user was mid-steer when the agent finished, clean up their input
-    if (steeringInputActive && rl) {
-      rl.write(null, { ctrl: true, name: 'u' }); // Clear readline buffer
-      process.stdout.write('\x1b[2K\x1b[0G');    // Clear the steering prompt line
-      if (restorePromptFn) restorePromptFn();     // Restore normal prompt string
+    // Clean up prompt-during-work
+    if (promptDuringWork && rl) {
+      rl.write(null, { ctrl: true, name: 'u' }); // Clear any typed text
+      process.stdout.write('\x1b[2K\x1b[0G');     // Clear prompt line
+      process.stdout.write('\x1b[A\x1b[2K\x1b[0G'); // Move up, clear spinner line
+      if (restorePromptFn) restorePromptFn();
+    } else {
+      process.stdout.write('\x1b[2K\x1b[0G');
     }
-    // Reset steering state
-    spinnerPaused = false;
-    steeringInputActive = false;
-    pauseSpinnerFn = null;
-    resumeSpinnerFn = null;
+    promptDuringWork = false;
+    renderWorkingPrompt = null;
     if (statusBar) {
       statusBar.setInputHint('');
       statusBar.render();
     }
-  };
-
-  // Wire up pause/resume for mid-turn steering
-  pauseSpinnerFn = () => {
-    // Clear the spinner line so user can type below it
-    process.stdout.write('\x1b[2K\x1b[0G');
-  };
-  resumeSpinnerFn = () => {
-    // Re-render current status on spinner line
-    spinnerPaused = false;
-    steeringInputActive = false;
-    updateSpinner();
   };
 
   // Determine prompt - use model-specific prompt if available
@@ -3420,7 +3468,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       onToolCall: (tool, args) => {
         stepCount++;
         const toolMsg = toolMessages[tool] || '🔧 Using';
-        let detail = args.path || args.pattern || args.command || args.query || (tool === 'call_mcp' ? args.tool : '') || (tool === 'spawn_agent' ? args.model : '') || '';
+        let detail = args.path || args.pattern || args.command || args.query || args.question || (tool === 'call_mcp' ? args.tool : '') || (tool === 'spawn_agent' ? args.model : '') || '';
         // Truncate detail to prevent spinner line from wrapping past terminal width
         const maxDetail = Math.max(20, (process.stdout.columns || 120) - 30);
         if (detail.length > maxDetail) detail = detail.slice(0, maxDetail - 3) + '...';
@@ -3441,7 +3489,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           }
           // Print completed step as a permanent line
           const icon = toolMessages[tool]?.split(' ')[0] || '🔧';
-          let detail = last.args.path || last.args.pattern || last.args.command || last.args.query || (tool === 'call_mcp' ? last.args.tool : '') || (tool === 'spawn_agent' ? last.args.model : '') || '';
+          let detail = last.args.path || last.args.pattern || last.args.command || last.args.query || last.args.question || (tool === 'call_mcp' ? last.args.tool : '') || (tool === 'spawn_agent' ? last.args.model : '') || '';
           const maxLen = Math.max(20, (process.stdout.columns || 120) - 20);
           if (detail.length > maxLen) detail = detail.slice(0, maxLen - 3) + '...';
           const label = detail || (toolMessages[tool] || tool).replace(/^\S+\s*/, '');
@@ -3450,13 +3498,16 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
             : `${c.green}✓${c.reset}`;
           const errInfo = (!success && last.errorMsg) ? ` ${c.red}${last.errorMsg}${c.reset}` : '';
           // Clear spinner line, print permanent step, restart spinner on next line
-          if (!spinnerPaused) {
+          if (promptDuringWork) {
+            // Clear prompt line, move up and clear spinner line
+            process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+          } else {
             process.stdout.write(`\x1b[2K\x1b[0G`);
           }
           console.log(`${borderRenderer.prefix('tool')}${status} ${c.dim}${last.stepNum}. ${icon} ${label}${errInfo}${c.reset}`);
-          // If user is typing a steering message, re-render the steering prompt
-          if (steeringInputActive && rl) {
-            rl.prompt(true);
+          if (promptDuringWork && renderWorkingPrompt) {
+            // Re-render spinner + prompt below the permanent output
+            renderWorkingPrompt();
           }
         }
       },
@@ -3468,12 +3519,14 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
         if (firstSentence) narration = firstSentence[0];
         if (narration.length > 120) narration = narration.slice(0, 117) + '...';
         if (narration) {
-          if (!spinnerPaused) {
+          if (promptDuringWork) {
+            process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+          } else {
             process.stdout.write(`\x1b[2K\x1b[0G`);
           }
           console.log(`${borderRenderer.prefix('thinking')}${c.cyan}> ${narration}${c.reset}`);
-          if (steeringInputActive && rl) {
-            rl.prompt(true);
+          if (promptDuringWork && renderWorkingPrompt) {
+            renderWorkingPrompt();
           }
         }
       },
@@ -3521,43 +3574,170 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
         }
       },
       onReasoning: (reasoning) => {
-        stopSpinner();
+        // Clear spinner+prompt before printing reasoning block
+        if (promptDuringWork) {
+          process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+        } else {
+          process.stdout.write('\x1b[2K\x1b[0G');
+        }
         console.log(`${borderRenderer.prefix('thinking')}${c.dim}┌─ 🧠 Reasoning${c.reset}`);
         const lines = reasoning.trim().split('\n');
         for (const line of lines) {
           console.log(`${borderRenderer.prefix('thinking')}${c.dim}│ ${line}${c.reset}`);
         }
-        console.log(`${borderRenderer.prefix('thinking')}${c.dim}└─${c.reset}\n`);
+        console.log(`${borderRenderer.prefix('thinking')}${c.dim}└─${c.reset}`);
+        // Re-render spinner + prompt after reasoning block
+        if (promptDuringWork && renderWorkingPrompt) {
+          renderWorkingPrompt();
+        }
       },
       onWarning: (msg) => {
-        console.log(`\n${PAD}${c.yellow}⚠ ${msg}${c.reset}`);
+        if (promptDuringWork) {
+          process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+          console.log(`${PAD}${c.yellow}⚠ ${msg}${c.reset}`);
+          if (renderWorkingPrompt) renderWorkingPrompt();
+        } else {
+          console.log(`\n${PAD}${c.yellow}⚠ ${msg}${c.reset}`);
+        }
       },
-      // Sub-agent support: inject spawn_agent tool when not in plan mode
-      customTools: (interactionMode !== 'plan' && subAgentManager) ? [SPAWN_AGENT_TOOL_DEF] : [],
-      customToolExecutors: subAgentManager ? new Map([
-        ['spawn_agent', async (args, opts) => {
+      // Custom tools: ask_human (always), spawn_agent (work mode only)
+      customTools: [
+        ASK_HUMAN_TOOL_DEF,
+        ...((interactionMode !== 'plan' && subAgentManager) ? [SPAWN_AGENT_TOOL_DEF] : [])
+      ],
+      customToolExecutors: new Map([
+        ['ask_human', async (args, opts) => {
+          const question = args.question || 'Do you have any input?';
+
+          // Stop spinner and show question UI
+          if (statusInterval) {
+            clearInterval(statusInterval);
+            statusInterval = null;
+          }
+
+          // Clear spinner + prompt lines if active
+          if (promptDuringWork) {
+            process.stdout.write('\x1b[2K\x1b[0G');           // Clear prompt line
+            process.stdout.write('\x1b[A\x1b[2K\x1b[0G');     // Move up, clear spinner line
+          } else {
+            process.stdout.write('\x1b[2K\x1b[0G');
+          }
+
+          // Display the question prominently
+          const cols = process.stdout.columns || 80;
+          const border = '─'.repeat(Math.min(cols - 6, 60));
+          console.log(`${borderRenderer.prefix('tool')}${c.cyan}┌─ Question ${border}${c.reset}`);
+          // Word-wrap the question for readability
+          const maxLineLen = Math.min(cols - 8, 76);
+          const words = question.split(/\s+/);
+          let line = '';
+          for (const word of words) {
+            if (line.length + word.length + 1 > maxLineLen && line.length > 0) {
+              console.log(`${borderRenderer.prefix('tool')}${c.cyan}│${c.reset} ${line}`);
+              line = word;
+            } else {
+              line = line ? `${line} ${word}` : word;
+            }
+          }
+          if (line) {
+            console.log(`${borderRenderer.prefix('tool')}${c.cyan}│${c.reset} ${line}`);
+          }
+          console.log(`${borderRenderer.prefix('tool')}${c.cyan}└${border}─${c.reset}`);
+
+          // Show answer prompt
+          promptDuringWork = false; // Temporarily disable spinner-based prompt
+          const answerPrefix = `${PAD}${c.cyan}Answer →${c.reset} `;
+          rl.setPrompt(answerPrefix);
+          process.stdout.write('\n');
+          rl.prompt(false);
+          if (statusBar) {
+            statusBar.setInputHint('Type your answer and press Enter');
+            statusBar.render();
+          }
+
+          // Wait for user input, racing against abort signal
+          const answer = await new Promise((resolve) => {
+            pendingHumanQuestion = { resolve, question };
+            // If aborted from outside the Escape handler, unblock the Promise
+            if (opts.signal) {
+              const onAbort = () => {
+                if (pendingHumanQuestion) {
+                  pendingHumanQuestion = null;
+                  resolve('(cancelled)');
+                }
+              };
+              if (opts.signal.aborted) { onAbort(); return; }
+              opts.signal.addEventListener('abort', onAbort, { once: true });
+            }
+          });
+
+          // Resume spinner
+          promptDuringWork = true;
+          const steerPrefix = `${PAD}${c.dim}>${c.reset} `;
+          rl.setPrompt(steerPrefix);
+
+          // Show answer confirmation
+          console.log(`${borderRenderer.prefix('tool')}${c.green}✓${c.reset} ${c.dim}Answer received${c.reset}`);
+
+          // Restart spinner + prompt
+          statusInterval = setInterval(updateSpinner, 100);
+          process.stdout.write(`\n${fitToTerminal(getSpinnerText())}\n`);
+          rl.prompt(false);
+          renderWorkingPrompt = () => {
+            process.stdout.write(`${fitToTerminal(getSpinnerText())}\n`);
+            rl.prompt(false);
+            if (statusBar) statusBar.render();
+          };
+          if (statusBar) {
+            statusBar.setInputHint('Esc\u00d72 to cancel');
+            statusBar.render();
+          }
+
+          return { response: answer };
+        }],
+        ...(subAgentManager ? [['spawn_agent', async (args, opts) => {
           // UI: show sub-agent spawning inline
           const resolved = modelRegistry.resolveModelKey(args.model);
           const modelLabel = resolved?.key || args.model;
           const providerLabel = PROVIDER_LABELS[resolved?.provider || 'local'] || resolved?.provider || 'local';
 
-          process.stdout.write(`\x1b[2K\x1b[0G`);
+          // Clear spinner+prompt before sub-agent output
+          if (promptDuringWork) {
+            process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+          } else {
+            process.stdout.write(`\x1b[2K\x1b[0G`);
+          }
           console.log(`${borderRenderer.prefix('tool')}${c.cyan}> Spawning agent [${modelLabel}] (${providerLabel})${c.reset}`);
           console.log(`${borderRenderer.prefix('tool')}${c.dim}  Task: "${args.task?.slice(0, 80) || ''}"${c.reset}`);
+          if (promptDuringWork && renderWorkingPrompt) {
+            renderWorkingPrompt();
+          }
 
           // Set sub-agent callbacks for inline display
           subAgentManager.onAgentToolCall = (agent, tool, toolArgs) => {
             const detail = toolArgs.path || toolArgs.pattern || toolArgs.command || toolArgs.query || '';
+            if (promptDuringWork) {
+              process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+            }
             console.log(`${borderRenderer.prefix('tool')}${c.dim}  | > ${tool} ${detail}${c.reset}`);
+            if (promptDuringWork && renderWorkingPrompt) renderWorkingPrompt();
           };
           subAgentManager.onAgentComplete = (agent) => {
             const elapsed = ((agent.completedAt - agent.startedAt) / 1000).toFixed(1);
             const tokens = agent.tokens?.total ? `${(agent.tokens.total / 1000).toFixed(1)}k tokens` : '';
             const steps = agent.toolCalls?.length || 0;
+            if (promptDuringWork) {
+              process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+            }
             console.log(`${borderRenderer.prefix('tool')}${c.dim}  +-- Complete (${steps} steps, ${elapsed}s${tokens ? ', ' + tokens : ''})${c.reset}`);
+            if (promptDuringWork && renderWorkingPrompt) renderWorkingPrompt();
           };
           subAgentManager.onAgentError = (agent, err) => {
+            if (promptDuringWork) {
+              process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+            }
             console.log(`${borderRenderer.prefix('tool')}${c.red}  +-- Failed: ${err.message || err}${c.reset}`);
+            if (promptDuringWork && renderWorkingPrompt) renderWorkingPrompt();
           };
 
           const result = await subAgentManager.spawn(args.model, args.task, {
@@ -3575,8 +3755,8 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           }
 
           return result;
-        }]
-      ]) : null
+        }]] : [])
+      ])
     });
 
     // Use model-specific inference settings
@@ -4348,14 +4528,19 @@ function createReadlineInterface() {
 
     // --- Escape handling ---
     if (key.name === 'escape') {
-      // If steering input is active, cancel it and resume spinner
-      if (steeringInputActive) {
-        steeringInputActive = false;
-        spinnerPaused = false;
-        rl.write(null, { ctrl: true, name: 'u' }); // Clear typed text from readline buffer
-        process.stdout.write('\x1b[2K\x1b[0G');    // Clear the steering prompt line
-        if (restorePromptFn) restorePromptFn();     // Restore normal prompt string
-        if (resumeSpinnerFn) resumeSpinnerFn();
+      // During work with prompt visible: single Escape clears typed text
+      if (currentAbortController && promptDuringWork && rl.line) {
+        rl.write(null, { ctrl: true, name: 'u' }); // Clear typed text
+        process.stdout.write('\x1b[2K\x1b[0G');
+        rl.prompt(false);
+        if (statusBar) statusBar.render();
+        return;
+      }
+      // During ask_human: single Escape clears typed text
+      if (pendingHumanQuestion && rl.line) {
+        rl.write(null, { ctrl: true, name: 'u' });
+        process.stdout.write('\x1b[2K\x1b[0G');
+        rl.prompt(false);
         if (statusBar) statusBar.render();
         return;
       }
@@ -4363,39 +4548,37 @@ function createReadlineInterface() {
       if (currentAbortController) {
         const now = Date.now();
         if (now - lastEscapeTime < 500) {
+          // Clean up pending question if any
+          if (pendingHumanQuestion) {
+            pendingHumanQuestion.resolve('(cancelled)');
+            pendingHumanQuestion = null;
+          }
           currentAbortController.abort();
           lastEscapeTime = 0;
         } else {
           lastEscapeTime = now;
-          process.stdout.write(`\n${PAD}${c.dim}Press Esc again to cancel${c.reset}`);
+          // Show cancel hint in the status bar gap row
+          if (statusBar) {
+            statusBar.setInputHint('Press Esc again to cancel');
+            statusBar.render();
+            setTimeout(() => {
+              if (pendingHumanQuestion) {
+                statusBar.setInputHint('Type your answer and press Enter');
+              } else if (promptDuringWork) {
+                statusBar.setInputHint('Esc\u00d72 to cancel');
+              } else {
+                statusBar.setInputHint('');
+              }
+              statusBar.render();
+            }, 2000);
+          }
         }
       }
       return;
     }
 
-    // --- Mid-turn typing: pause spinner when user starts typing during active request ---
-    if (currentAbortController && !steeringInputActive && !spinnerPaused) {
-      // Printable character while agent is working - enter steering mode
-      const isPrintable = char && char.length === 1 && !key.ctrl && !key.meta;
-      if (isPrintable) {
-        spinnerPaused = true;
-        steeringInputActive = true;
-        if (pauseSpinnerFn) pauseSpinnerFn();
-        // Show steering input using readline's proper prompt mechanism.
-        // The triggering char is already in readline's line buffer (our
-        // keypress handler fires after readline's internal handler). Calling
-        // prompt() redraws the prompt prefix + rl.line, making the char visible.
-        const steerPrompt = `${PAD}${c.dim}Steer →${c.reset} `;
-        rl.setPrompt(steerPrompt);
-        process.stdout.write(`\n`);
-        rl.prompt(false);
-        if (statusBar) statusBar.render();
-        return;
-      }
-    }
-
-    // --- If steering input is active, let keystrokes go to readline normally ---
-    if (steeringInputActive) {
+    // --- During work, prompt is always visible - let keystrokes go to readline ---
+    if (currentAbortController && promptDuringWork) {
       return;
     }
   });
@@ -4748,32 +4931,37 @@ Examples:
     steerPasteBuffer = [];
     steerPasteTimer = null;
 
-    // If steering was already cancelled (e.g., new request started), discard
-    if (!steeringInputActive && !currentAbortController) return;
+    // If request already finished, discard
+    if (!currentAbortController) return;
 
-    steeringInputActive = false;
-    spinnerPaused = false;
-    if (restorePromptFn) restorePromptFn();
-
-    if (!fullText) {
-      if (resumeSpinnerFn) resumeSpinnerFn();
-      return;
-    }
+    if (!fullText) return;
 
     // Strip /steer prefix if they used it out of habit
     const cleanText = fullText.replace(/^\/steer(?:ing)?\s+/i, '');
     if (cleanText) {
-      if (lineCount > 1) {
+      if (lineCount > 1 && promptDuringWork) {
+        // Print paste indicator above spinner+prompt
+        process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
         console.log(`${PAD}${c.dim}(pasted ${lineCount} lines as steering)${c.reset}`);
+        if (renderWorkingPrompt) renderWorkingPrompt();
       }
       if (requestMidTurnSteer(cleanText)) {
-        console.log(`${PAD}${c.cyan}Steering received. Redirecting...${c.reset}\n`);
+        if (promptDuringWork) {
+          process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+          console.log(`${PAD}${c.cyan}Steering received. Redirecting...${c.reset}`);
+          if (renderWorkingPrompt) renderWorkingPrompt();
+        } else {
+          console.log(`${PAD}${c.cyan}Steering received. Redirecting...${c.reset}\n`);
+        }
       } else {
-        console.log(`${PAD}${c.yellow}Could not apply steering.${c.reset}\n`);
-        if (resumeSpinnerFn) resumeSpinnerFn();
+        if (promptDuringWork) {
+          process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+          console.log(`${PAD}${c.yellow}Could not apply steering.${c.reset}`);
+          if (renderWorkingPrompt) renderWorkingPrompt();
+        } else {
+          console.log(`${PAD}${c.yellow}Could not apply steering.${c.reset}\n`);
+        }
       }
-    } else {
-      if (resumeSpinnerFn) resumeSpinnerFn();
     }
   };
 
@@ -4782,41 +4970,47 @@ Examples:
     // This prevents output from commands, model switching, pickers, etc.
     // from being treated as user input.
     if (!waitingForInput) {
+      // ask_human: resolve pending question with user's answer
+      if (pendingHumanQuestion) {
+        const answer = String(input || '').trim() || '(no answer)';
+        const { resolve } = pendingHumanQuestion;
+        pendingHumanQuestion = null;
+        resolve(answer);
+        return;
+      }
+
       // Mid-turn steering: user typed while agent was working
       if (currentAbortController) {
         const trimmed = String(input || '').trim();
 
-        // Direct typing steering (Claude Code style) - buffer lines for paste support
-        if (steeringInputActive) {
-          if (!trimmed && steerPasteBuffer.length === 0) {
-            // Empty Enter with nothing buffered: cancel steering
-            steeringInputActive = false;
-            spinnerPaused = false;
-            if (restorePromptFn) restorePromptFn();
-            process.stdout.write('\x1b[2K\x1b[0G');
-            if (resumeSpinnerFn) resumeSpinnerFn();
-            return;
+        if (!trimmed) {
+          // Empty Enter: restore spinner+prompt layout.
+          // After readline's Enter, cursor is at N+2. Layout:
+          //   N:   spinner
+          //   N+1: > (empty prompt)
+          //   N+2: [cursor - readline's newline]
+          // Move up to spinner line (N), clear all 3 lines, re-render.
+          if (promptDuringWork) {
+            process.stdout.write('\x1b[A\x1b[2K\x1b[A\x1b[2K\x1b[0G');
+            // Clear the leftover line at N+2 as well
+            process.stdout.write('\x1b[B\x1b[B\x1b[2K\x1b[A\x1b[A\x1b[0G');
+            if (renderWorkingPrompt) renderWorkingPrompt();
           }
-          // Buffer this line and wait for more (paste detection)
-          if (trimmed) steerPasteBuffer.push(trimmed);
-          if (steerPasteTimer) clearTimeout(steerPasteTimer);
-          steerPasteTimer = setTimeout(flushSteerPasteBuffer, PASTE_DELAY_MS);
           return;
         }
 
-        // Legacy: /steer command still works without needing the typing detection
-        if (trimmed) {
-          const steerMatch = trimmed.match(/^\/steer(?:ing)?\s+(.+)$/i);
-          if (steerMatch) {
-            const steerText = steerMatch[1].trim();
-            if (steerText) {
-              if (requestMidTurnSteer(steerText)) {
-                console.log(`\n${PAD}${c.cyan}Steering received. Redirecting...${c.reset}\n`);
-              } else {
-                console.log(`\n${PAD}${c.yellow}Could not apply steering.${c.reset}\n`);
-              }
-            }
-          }
+        // Buffer lines for paste support, then process as steering
+        steerPasteBuffer.push(trimmed);
+        if (steerPasteTimer) clearTimeout(steerPasteTimer);
+        steerPasteTimer = setTimeout(flushSteerPasteBuffer, PASTE_DELAY_MS);
+
+        // Fix layout: readline added a newline after submitted text.
+        // Cursor at N+2, spinner at N, old prompt+text at N+1.
+        // Move to spinner line, clear all, re-render spinner+prompt.
+        if (promptDuringWork) {
+          process.stdout.write('\x1b[A\x1b[2K\x1b[A\x1b[2K\x1b[0G');
+          process.stdout.write('\x1b[B\x1b[B\x1b[2K\x1b[A\x1b[A\x1b[0G');
+          if (renderWorkingPrompt) renderWorkingPrompt();
         }
       }
       return;
@@ -4856,6 +5050,18 @@ Examples:
   process.stdout.on('resize', () => {
     if (resizeRefreshTimer) clearTimeout(resizeRefreshTimer);
     resizeRefreshTimer = setTimeout(() => {
+      // During work with prompt visible: re-render prompt on resize
+      if (promptDuringWork && currentAbortController) {
+        if (renderWorkingPrompt) {
+          // Re-render both spinner and prompt for new terminal width
+          process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+          renderWorkingPrompt();
+        } else {
+          rl.prompt(true);
+        }
+        if (statusBar) statusBar.render();
+        return;
+      }
       if (!waitingForInput) return;
       if (currentAbortController) return;
       // Clear the current line (old prompt text) before redrawing
