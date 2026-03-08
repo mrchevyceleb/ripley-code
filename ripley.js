@@ -284,7 +284,7 @@ ${P}${c.orange}${c.dim}Config Commands:${c.reset}
 ${P}${c.yellow}/config${c.reset}             Show current config
 ${P}${c.yellow}/set <key> <value>${c.reset}  Update config setting
 ${P}${c.yellow}/instructions${c.reset}       Edit project instructions
-${P}${c.yellow}/mcp${c.reset}                Show MCP server status & tools
+${P}${c.yellow}/mcp${c.reset}                MCP server status, setup, auth, tools
 ${P}${c.yellow}/watch${c.reset}              Toggle file watch mode
 ${P}${c.yellow}/stream${c.reset}             Toggle streaming mode
 
@@ -525,11 +525,11 @@ async function checkConnection() {
   const mcpConnected = await mcpClient.isConnected();
   if (mcpConnected) {
     const status = mcpClient.getStatus();
-    const serverLabel = status.serverName ? `${status.serverName}` : 'assistant-mcp';
+    const serverLabel = status.serverName ? `${status.serverName}` : 'MCP server';
     console.log(`${PAD}${c.green}✓${c.reset} MCP: ${serverLabel} ${c.dim}(${status.url})${c.reset}`);
   } else {
     console.log(`${PAD}${c.yellow}○${c.reset} MCP: Not connected ${c.dim}(${mcpClient.url})${c.reset}`);
-    console.log(`${PAD}${c.dim}  Tools like get_tasks, get_calendar will fail. Set mcpUrl with /set${c.reset}`);
+    console.log(`${PAD}${c.dim}  Tools like get_tasks, get_calendar will fail. Run /mcp to set up.${c.reset}`);
   }
 
   return true;
@@ -1028,7 +1028,10 @@ async function switchModel(modelKey, options = {}) {
             await lmStudio.unloadModel(inst.instanceId);
             if (!silent) console.log(`${PAD}${c.dim}Unloaded ${inst.displayName || inst.key}${c.reset}`);
           } catch (err) {
-            if (!silent) console.log(`${PAD}${c.yellow}⚠ Could not unload ${inst.key}: ${err.message}${c.reset}`);
+            // 404 = model already ejected by LM Studio (normal during swap)
+            if (!silent && !err.message.includes('404')) {
+              console.log(`${PAD}${c.yellow}⚠ Could not unload ${inst.key}: ${err.message}${c.reset}`);
+            }
           }
         }
         const ctxLen = switched.contextLimit || 32768;
@@ -1907,20 +1910,112 @@ async function handleCommand(input) {
       return true;
     }
 
-    case '/mcp':
+    case '/mcp': {
+      const mcpSubcommand = args.trim().toLowerCase();
+
+      // /mcp disconnect - clear saved URL and reset client
+      if (mcpSubcommand === 'disconnect') {
+        config.set('mcpUrl', null);
+        mcpClient.url = '';
+        mcpClient.sessionId = null;
+        mcpClient.initialized = false;
+        mcpClient.serverInfo = null;
+        if (statusBar) statusBar.update({ mcpConnected: false });
+        console.log(`\n${PAD}${c.green}✓${c.reset} MCP disconnected and URL cleared.\n`);
+        return true;
+      }
+
+      // /mcp auth - check and set up Google OAuth
+      if (mcpSubcommand === 'auth') {
+        try {
+          const authConnected = await mcpClient.isConnected();
+          if (!authConnected) {
+            console.log(`\n${PAD}${c.red}✗ MCP not connected. Run /mcp first.${c.reset}\n`);
+            return true;
+          }
+          console.log(`\n${PAD}${c.cyan}Google Auth Status${c.reset}`);
+          console.log(`${PAD}${c.dim}Checking...${c.reset}`);
+          const authResult = await mcpClient.callTool('check_google_auth', {});
+          const authText = typeof authResult === 'string' ? authResult : JSON.stringify(authResult);
+          const isAuthed = /authorized|authenticated|connected|valid/i.test(authText) && !/not\s+(authorized|authenticated|connected)/i.test(authText);
+
+          if (isAuthed) {
+            console.log(`${PAD}${c.green}✓ Google account authorized${c.reset}`);
+            console.log(`${PAD}${c.dim}  Gmail, Calendar, and Drive tools are available.${c.reset}`);
+          } else {
+            console.log(`${PAD}${c.yellow}○ Google account not authorized${c.reset}`);
+            console.log(`${PAD}${c.dim}  Gmail, Calendar, and Drive require Google OAuth.${c.reset}`);
+            console.log();
+            const doAuth = await askQuestion(`${PAD}${c.cyan}Start Google auth flow? (y/n): ${c.reset}`);
+            if (doAuth.trim().toLowerCase() === 'y') {
+              console.log(`${PAD}${c.dim}Starting authorization...${c.reset}`);
+              const startResult = await mcpClient.callTool('authorize_google', {});
+              const startText = typeof startResult === 'string' ? startResult : JSON.stringify(startResult);
+
+              // Look for an auth URL in the response
+              const urlMatch = startText.match(/https?:\/\/\S+/);
+              if (urlMatch) {
+                console.log(`\n${PAD}${c.cyan}Open this URL in your browser:${c.reset}`);
+                console.log(`${PAD}${c.white}${urlMatch[0]}${c.reset}`);
+                console.log();
+                const authCode = await askQuestion(`${PAD}${c.cyan}Paste the authorization code: ${c.reset}`);
+                const code = authCode.trim();
+                if (code) {
+                  console.log(`${PAD}${c.dim}Completing authorization...${c.reset}`);
+                  const completeResult = await mcpClient.callTool('complete_google_auth', { code });
+                  const completeText = typeof completeResult === 'string' ? completeResult : JSON.stringify(completeResult);
+                  if (/success|authorized|complete/i.test(completeText)) {
+                    console.log(`${PAD}${c.green}✓ Google account authorized!${c.reset}`);
+                    console.log(`${PAD}${c.dim}  Gmail, Calendar, and Drive tools are now available.${c.reset}`);
+                  } else {
+                    console.log(`${PAD}${c.yellow}Server response: ${completeText.slice(0, 200)}${c.reset}`);
+                  }
+                } else {
+                  console.log(`${PAD}${c.dim}Skipped${c.reset}`);
+                }
+              } else {
+                // Server might handle auth differently (e.g. auto-open browser)
+                console.log(`${PAD}${c.dim}${startText.slice(0, 300)}${c.reset}`);
+              }
+            } else {
+              console.log(`${PAD}${c.dim}Skipped${c.reset}`);
+            }
+          }
+        } catch (authErr) {
+          console.log(`${PAD}${c.red}✗ Auth check failed: ${authErr.message}${c.reset}`);
+          console.log(`${PAD}${c.dim}  Your MCP server may not support Google auth tools.${c.reset}`);
+        }
+        console.log();
+        return true;
+      }
+
       console.log(`\n${PAD}${c.cyan}MCP Server Status${c.reset}`);
       try {
         const mcpConnected = await mcpClient.isConnected();
         if (statusBar) statusBar.update({ mcpConnected });
         const mcpStatus = mcpClient.getStatus();
 
-        if (mcpConnected) {
-          const serverLabel = mcpStatus.serverName || 'assistant-mcp';
+        if (mcpConnected && mcpSubcommand !== 'connect') {
+          const serverLabel = mcpStatus.serverName || 'MCP server';
           const serverVer = mcpStatus.serverVersion ? ` v${mcpStatus.serverVersion}` : '';
           console.log(`${PAD}${c.green}✓ Connected${c.reset} to ${serverLabel}${serverVer}`);
           console.log(`${PAD}${c.dim}  URL: ${mcpStatus.url}${c.reset}`);
           if (mcpStatus.sessionId) {
             console.log(`${PAD}${c.dim}  Session: ${mcpStatus.sessionId}${c.reset}`);
+          }
+
+          // Check Google auth status
+          try {
+            const gAuthResult = await mcpClient.callTool('check_google_auth', {});
+            const gAuthText = typeof gAuthResult === 'string' ? gAuthResult : JSON.stringify(gAuthResult);
+            const gAuthed = /authorized|authenticated|connected|valid/i.test(gAuthText) && !/not\s+(authorized|authenticated|connected)/i.test(gAuthText);
+            if (gAuthed) {
+              console.log(`${PAD}${c.green}✓${c.reset} Google: authorized`);
+            } else {
+              console.log(`${PAD}${c.yellow}○${c.reset} Google: not authorized ${c.dim}(run /mcp auth to set up)${c.reset}`);
+            }
+          } catch {
+            // Server doesn't support Google auth check - skip silently
           }
 
           // List available tools
@@ -1933,16 +2028,114 @@ async function handleCommand(input) {
           } catch (toolErr) {
             console.log(`\n${PAD}${c.yellow}Could not list tools: ${toolErr.message}${c.reset}`);
           }
+          console.log(`\n${PAD}${c.dim}  /mcp connect    Change server URL${c.reset}`);
+          console.log(`${PAD}${c.dim}  /mcp auth       Google OAuth setup${c.reset}`);
+          console.log(`${PAD}${c.dim}  /mcp disconnect  Disconnect and clear URL${c.reset}`);
         } else {
-          console.log(`${PAD}${c.red}✗ Not connected${c.reset}`);
-          console.log(`${PAD}${c.dim}  URL: ${mcpStatus.url}${c.reset}`);
-          console.log(`${PAD}${c.dim}  Set URL: /set mcpUrl <url>${c.reset}`);
+          // Not connected or explicit /mcp connect - run setup wizard
+          if (!mcpSubcommand) {
+            console.log(`${PAD}${c.red}✗ Not connected${c.reset}`);
+            if (mcpStatus.url) {
+              console.log(`${PAD}${c.dim}  URL: ${mcpStatus.url}${c.reset}`);
+            }
+          }
+
+          console.log(`\n${PAD}${c.cyan}MCP Setup${c.reset}`);
+          console.log(`${PAD}${c.dim}  MCP servers provide external tools (tasks, calendar, email, etc.)${c.reset}`);
+          console.log(`${PAD}${c.dim}  Enter the URL of your MCP server, or press Enter to skip.${c.reset}`);
+          if (mcpStatus.url) {
+            console.log(`${PAD}${c.dim}  Current: ${mcpStatus.url}${c.reset}`);
+          }
+          console.log();
+
+          const mcpInput = await askQuestion(`${PAD}${c.cyan}MCP server URL: ${c.reset}`);
+          const mcpUrl = mcpInput.trim();
+
+          if (!mcpUrl) {
+            console.log(`${PAD}${c.dim}Skipped${c.reset}\n`);
+          } else {
+            // Validate URL format
+            try {
+              new URL(mcpUrl);
+            } catch {
+              console.log(`${PAD}${c.red}✗ Invalid URL format${c.reset}\n`);
+              return true;
+            }
+
+            console.log(`${PAD}${c.dim}Testing connection...${c.reset}`);
+            // Normalize: strip trailing slash
+            let finalUrl = mcpUrl.replace(/\/+$/, '');
+
+            // Auto-discover MCP endpoint via /connect if user gave a base URL
+            if (!finalUrl.endsWith('/mcp') && !finalUrl.endsWith('/sse')) {
+              try {
+                const discoverRes = await fetch(finalUrl + '/connect', {
+                  signal: AbortSignal.timeout(8000)
+                });
+                if (discoverRes.ok) {
+                  const discovery = await discoverRes.json();
+                  const mcpEndpoint = discovery?.endpoints?.mcp_streamable_http;
+                  if (mcpEndpoint) {
+                    console.log(`${PAD}${c.dim}  Discovered MCP endpoint: ${mcpEndpoint}${c.reset}`);
+                    finalUrl = mcpEndpoint;
+                  }
+                }
+              } catch {
+                // Discovery not available, continue with fallback logic
+              }
+            }
+
+            mcpClient.url = finalUrl;
+            mcpClient.sessionId = null;
+            mcpClient.initialized = false;
+            mcpClient.serverInfo = null;
+
+            let testOk = await mcpClient.isConnected();
+
+            // If still failed, try appending /mcp (common MCP endpoint path)
+            if (!testOk && !finalUrl.endsWith('/mcp')) {
+              const withMcp = mcpUrl.replace(/\/+$/, '') + '/mcp';
+              console.log(`${PAD}${c.dim}  Trying ${withMcp}...${c.reset}`);
+              mcpClient.url = withMcp;
+              mcpClient.sessionId = null;
+              mcpClient.initialized = false;
+              mcpClient.serverInfo = null;
+              testOk = await mcpClient.isConnected();
+              if (testOk) finalUrl = withMcp;
+            }
+
+            if (testOk) {
+              config.set('mcpUrl', finalUrl);
+              if (statusBar) statusBar.update({ mcpConnected: true });
+              const info = mcpClient.getStatus();
+              const label = info.serverName || 'MCP server';
+              const ver = info.serverVersion ? ` v${info.serverVersion}` : '';
+              console.log(`${PAD}${c.green}✓ Connected${c.reset} to ${label}${ver}`);
+              console.log(`${PAD}${c.dim}  URL saved to config${c.reset}`);
+
+              // Show tool count
+              try {
+                const tools = await mcpClient.listTools();
+                console.log(`${PAD}${c.dim}  ${tools.length} tools available${c.reset}`);
+              } catch {}
+            } else {
+              console.log(`${PAD}${c.red}✗ Could not connect to ${mcpUrl}${c.reset}`);
+              console.log(`${PAD}${c.dim}  URL not saved. Check the server is running and try again.${c.reset}`);
+              // Revert to previous URL
+              const prevUrl = config.get('mcpUrl') || '';
+              mcpClient.url = prevUrl;
+              mcpClient.sessionId = null;
+              mcpClient.initialized = false;
+              mcpClient.serverInfo = null;
+            }
+          }
         }
       } catch (mcpErr) {
         console.log(`${PAD}${c.red}✗ Error: ${mcpErr.message}${c.reset}`);
       }
       console.log();
       return true;
+    }
 
     case '/config':
       const allConfig = config.getAll();
@@ -2590,8 +2783,16 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
         updateSpinner();
         toolCallsDisplayed.push({ tool, args });
       },
-      onToolResult: (tool, success) => {
-        // Spinner continues
+      onToolResult: (tool, success, result) => {
+        if (toolCallsDisplayed.length > 0) {
+          const last = toolCallsDisplayed[toolCallsDisplayed.length - 1];
+          last.success = success;
+          if (result?._mcp && success) {
+            last.mcpPreview = JSON.stringify(result.result || '').slice(0, 100);
+          } else if (result?.error) {
+            last.errorMsg = String(result.error).slice(0, 120);
+          }
+        }
       },
       onToken: (token) => {
         // First token: stop spinner, print header, start streaming
@@ -2607,7 +2808,13 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
               const icon = toolMessages[tc.tool]?.split(' ')[0] || '🔧';
               const detail = tc.args.path || tc.args.pattern || tc.args.command || tc.args.query || (tc.tool === 'call_mcp' ? tc.args.tool : '') || '';
               const label = detail || (toolMessages[tc.tool] || tc.tool).replace(/^\S+\s*/, '');
-              console.log(`${borderRenderer.prefix('tool')}${c.dim}│ ${c.green}✓${c.reset}${c.dim} ${icon} ${label}${c.reset}`);
+              if (tc.success === false) {
+                const err = tc.errorMsg ? ` ${c.red}${tc.errorMsg}${c.reset}` : '';
+                console.log(`${borderRenderer.prefix('tool')}${c.dim}│ ${c.red}✗${c.reset}${c.dim} ${icon} ${label}${err}${c.reset}`);
+              } else {
+                const preview = tc.mcpPreview ? ` ${c.dim}→ ${tc.mcpPreview.slice(0, 80)}${tc.mcpPreview.length > 80 ? '…' : ''}${c.reset}` : '';
+                console.log(`${borderRenderer.prefix('tool')}${c.dim}│ ${c.green}✓${c.reset}${c.dim} ${icon} ${label}${preview}${c.reset}`);
+              }
             }
             console.log(`${borderRenderer.prefix('tool')}${c.dim}└─${c.reset}`);
           }
