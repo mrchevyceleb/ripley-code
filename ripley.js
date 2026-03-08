@@ -4713,6 +4713,46 @@ Examples:
     await processInput(fullInput);
   };
 
+  // Steering paste buffer: collects rapid lines during mid-turn steering
+  // so multi-line pastes become a single steering message.
+  let steerPasteBuffer = [];
+  let steerPasteTimer = null;
+
+  const flushSteerPasteBuffer = () => {
+    const fullText = steerPasteBuffer.join('\n').trim();
+    const lineCount = steerPasteBuffer.length;
+    steerPasteBuffer = [];
+    steerPasteTimer = null;
+
+    // If steering was already cancelled (e.g., new request started), discard
+    if (!steeringInputActive && !currentAbortController) return;
+
+    steeringInputActive = false;
+    spinnerPaused = false;
+    if (restorePromptFn) restorePromptFn();
+
+    if (!fullText) {
+      if (resumeSpinnerFn) resumeSpinnerFn();
+      return;
+    }
+
+    // Strip /steer prefix if they used it out of habit
+    const cleanText = fullText.replace(/^\/steer(?:ing)?\s+/i, '');
+    if (cleanText) {
+      if (lineCount > 1) {
+        console.log(`${PAD}${c.dim}(pasted ${lineCount} lines as steering)${c.reset}`);
+      }
+      if (requestMidTurnSteer(cleanText)) {
+        console.log(`${PAD}${c.cyan}Steering received. Redirecting...${c.reset}\n`);
+      } else {
+        console.log(`${PAD}${c.yellow}Could not apply steering.${c.reset}\n`);
+        if (resumeSpinnerFn) resumeSpinnerFn();
+      }
+    } else {
+      if (resumeSpinnerFn) resumeSpinnerFn();
+    }
+  };
+
   const handleLine = (input) => {
     // Only accept input when we're actually waiting for it.
     // This prevents output from commands, model switching, pickers, etc.
@@ -4722,34 +4762,21 @@ Examples:
       if (currentAbortController) {
         const trimmed = String(input || '').trim();
 
-        // New: direct typing steering (Claude Code style)
-        if (steeringInputActive && trimmed) {
-          steeringInputActive = false;
-          spinnerPaused = false;
-          if (restorePromptFn) restorePromptFn(); // Restore normal prompt string
-          // Strip /steer prefix if they used it out of habit
-          const cleanText = trimmed.replace(/^\/steer(?:ing)?\s+/i, '');
-          if (cleanText) {
-            if (requestMidTurnSteer(cleanText)) {
-              console.log(`${PAD}${c.cyan}Steering received. Redirecting...${c.reset}\n`);
-            } else {
-              console.log(`${PAD}${c.yellow}Could not apply steering.${c.reset}\n`);
-              if (resumeSpinnerFn) resumeSpinnerFn();
-            }
-          } else {
-            // Empty after stripping prefix
+        // Direct typing steering (Claude Code style) - buffer lines for paste support
+        if (steeringInputActive) {
+          if (!trimmed && steerPasteBuffer.length === 0) {
+            // Empty Enter with nothing buffered: cancel steering
+            steeringInputActive = false;
+            spinnerPaused = false;
+            if (restorePromptFn) restorePromptFn();
+            process.stdout.write('\x1b[2K\x1b[0G');
             if (resumeSpinnerFn) resumeSpinnerFn();
+            return;
           }
-          return;
-        }
-
-        // Cancelled steering (empty Enter while steering prompt is up)
-        if (steeringInputActive && !trimmed) {
-          steeringInputActive = false;
-          spinnerPaused = false;
-          if (restorePromptFn) restorePromptFn(); // Restore normal prompt string
-          process.stdout.write('\x1b[2K\x1b[0G');
-          if (resumeSpinnerFn) resumeSpinnerFn();
+          // Buffer this line and wait for more (paste detection)
+          if (trimmed) steerPasteBuffer.push(trimmed);
+          if (steerPasteTimer) clearTimeout(steerPasteTimer);
+          steerPasteTimer = setTimeout(flushSteerPasteBuffer, PASTE_DELAY_MS);
           return;
         }
 
