@@ -32,6 +32,7 @@ For simple conversational messages (greetings, questions about general knowledge
 - Use `deep_research` for any factual question about people, events, companies, technology, history, etc. This uses Perplexity Sonar and returns source-backed results. NEVER answer factual questions from memory alone. If the user asks "tell me about X" or "research X", use this tool.
 - Use `web_search` for quick lookups, current events, or simple fact-checks (Brave Search).
 - **Critical rule:** Do NOT hallucinate facts. If you don't know something, use `deep_research` or `web_search` to find out. Wrong facts are worse than saying "let me look that up."
+- After using search tools, ONLY report facts that appear in the returned results. Never invent names, dates, titles, or events not found in the search data. If results are incomplete, say so explicitly rather than filling gaps from memory.
 
 ## Planning complex tasks
 
