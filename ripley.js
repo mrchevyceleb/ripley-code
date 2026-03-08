@@ -3590,6 +3590,11 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           streamingStarted = true;
           stopSpinner();
 
+          // Re-apply scroll region before writing response text.
+          // A prior resize or bar repaint can leave the cursor stranded in the
+          // status bar area, causing the entire response to be invisible.
+          if (statusBar) statusBar.install();
+
           // Brief summary line if there were steps
           if (toolCallsDisplayed.length > 0) {
             const stepWord = toolCallsDisplayed.length === 1 ? 'step' : 'steps';
@@ -5136,7 +5141,7 @@ Examples:
       rl.setPrompt(prefix);
       rl.prompt(true);  // preserveCursor: keep any text the user was typing
       if (statusBar) statusBar.render();
-    }, 100);
+    }, 150);  // Run after StatusBar's 80ms debounce so scroll region is settled
   });
 
   runStartupUiSelfCheck();

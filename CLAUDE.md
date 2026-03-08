@@ -143,6 +143,10 @@ Users create `RIPLEY.md` at their project root (like CLAUDE.md for Claude Code).
 - **Non-vision model loaded**: Falls back to Gemini API analysis (requires `GEMINI_API_KEY`)
 - Clipboard paste via `Alt+V`, file via `/image <path>`
 
+## Debug Logs
+
+Logs are at `~/.ripley/logs/ripley-YYYY-MM-DD.log`. Enabled by default (set `RIPLEY_DEBUG=0` to disable). Override path with `RIPLEY_DEBUG_PATH`.
+
 ## Environment
 
 - Windows with PowerShell
