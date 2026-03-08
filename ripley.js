@@ -3595,9 +3595,11 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       readOnly: interactionMode === 'plan'
     });
 
-    // Update context usage from actual API token count
+    // Update context usage from actual API token count, or estimate from messages
     if (runner.lastTurnTokens > 0) {
       setContextEstimate(runner.lastTurnTokens, { persistActual: true });
+    } else if (runner.lastTurnMessagesEstimate > 0) {
+      setContextEstimate(runner.lastTurnMessagesEstimate);
     }
     if (runner.totalPromptTokens > 0 || runner.totalCompletionTokens > 0) {
       tokenCounter.addUsage(runner.totalPromptTokens, runner.totalCompletionTokens);
