@@ -3844,7 +3844,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       tokenCounter.addUsage(runner.totalPromptTokens, runner.totalCompletionTokens);
     }
 
-    stopSpinner();
+    if (!streamingStarted) stopSpinner();
     // Clear stale midTurnSteerRequested if the run completed normally
     // (prevents ghost steers if abort raced with completion)
     midTurnSteerRequested = false;
