@@ -156,6 +156,8 @@ let midTurnSteerRequested = false;
 
 // Abort controller for cancelling requests with Escape (double-press)
 let currentAbortController = null;
+// Reference to the active AgenticRunner so steers can be injected without restarting
+let currentRunner = null;
 let lastEscapeTime = 0;
 
 // Mid-turn input: prompt is always visible during AI work (like Claude Code)
@@ -1135,6 +1137,14 @@ function requestMidTurnSteer(text) {
   if (!normalized) return false;
   if (!currentAbortController) return false;
 
+  // If we have an active runner, inject the steer directly without aborting.
+  // This preserves the tool call history and iteration state.
+  if (currentRunner && typeof currentRunner.injectSteer === 'function') {
+    currentRunner.injectSteer(normalized);
+    return true;
+  }
+
+  // Fallback: abort and restart (non-agentic path)
   queueSteeringMessage(normalized);
   midTurnSteerRequested = true;
   currentAbortController.abort();
@@ -2689,9 +2699,15 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     rl.prompt(false);
     // Store re-render function for use by handleLine/flushSteerPasteBuffer
     renderWorkingPrompt = () => {
+      const savedLine = rl.line || '';
+      const savedCursor = rl.cursor || 0;
       process.stdout.write(`${fitToTerminal(getStreamSpinnerText())}\n`);
       rl.setPrompt(buildPromptPrefix());
       rl.prompt(false);
+      if (savedLine) {
+        rl.write(savedLine);
+        // Note: cursor position resets to end-of-line; readline doesn't support mid-line restore
+      }
       if (statusBar) statusBar.render();
     };
     if (statusBar) {
@@ -2728,10 +2744,14 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     }
     // Clean up prompt-during-work if it was still active
     if (promptDuringWork && rl) {
-      rl.write(null, { ctrl: true, name: 'u' }); // Clear any typed text
+      const pendingInput = rl.line || '';
+      rl.write(null, { ctrl: true, name: 'u' }); // Clear the readline buffer
       process.stdout.write('\x1b[2K\x1b[0G');     // Clear prompt line
       process.stdout.write('\x1b[A\x1b[2K\x1b[0G'); // Move up, clear spinner line
       if (restorePromptFn) restorePromptFn();
+      if (pendingInput) {
+        rl.write(pendingInput);
+      }
     }
     promptDuringWork = false;
     renderWorkingPrompt = null;
@@ -3411,9 +3431,17 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     rl.prompt(false);
     // Store re-render function for use by handleLine/flushSteerPasteBuffer
     renderWorkingPrompt = () => {
+      // Save user's in-progress input before redrawing
+      const savedLine = rl.line || '';
+      const savedCursor = rl.cursor || 0;
       process.stdout.write(`${fitToTerminal(getSpinnerText())}\n`);
       rl.setPrompt(buildPromptPrefix());
       rl.prompt(false);
+      // Restore user's typed text so tool call updates don't erase it
+      if (savedLine) {
+        rl.write(savedLine);
+        // Note: cursor position resets to end-of-line; readline doesn't support mid-line restore
+      }
       if (statusBar) statusBar.render();
     };
     if (statusBar) {
@@ -3429,10 +3457,16 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     }
     // Clean up prompt-during-work
     if (promptDuringWork && rl) {
-      rl.write(null, { ctrl: true, name: 'u' }); // Clear any typed text
+      // Save any in-progress steer text before clearing the line
+      const pendingInput = rl.line || '';
+      rl.write(null, { ctrl: true, name: 'u' }); // Clear the readline buffer
       process.stdout.write('\x1b[2K\x1b[0G');     // Clear prompt line
       process.stdout.write('\x1b[A\x1b[2K\x1b[0G'); // Move up, clear spinner line
       if (restorePromptFn) restorePromptFn();
+      // If user was mid-typing a steer, restore their text
+      if (pendingInput) {
+        rl.write(pendingInput);
+      }
     } else {
       process.stdout.write('\x1b[2K\x1b[0G');
     }
@@ -3743,8 +3777,14 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           process.stdout.write(`\n${fitToTerminal(getSpinnerText())}\n`);
           rl.prompt(false);
           renderWorkingPrompt = () => {
+            const savedLine = rl.line || '';
+            const savedCursor = rl.cursor || 0;
             process.stdout.write(`${fitToTerminal(getSpinnerText())}\n`);
             rl.prompt(false);
+            if (savedLine) {
+              rl.write(savedLine);
+              // Note: cursor position resets to end-of-line; readline doesn't support mid-line restore
+            }
             if (statusBar) statusBar.render();
           };
           if (statusBar) {
@@ -3817,6 +3857,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
         }]] : [])
       ])
     });
+    currentRunner = runner;
 
     // Use model-specific inference settings
     currentAbortController = new AbortController();
@@ -3862,6 +3903,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     // Clear abort controller before processAIResponse so the plan review
     // prompt isn't hijacked by the mid-turn steering keypress handler.
     currentAbortController = null;
+    currentRunner = null;
 
     if (agenticSteeringCount > 0) {
       clearSteeringMessages();
@@ -3900,6 +3942,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
   } catch (error) {
     stopSpinner();
     currentAbortController = null;
+    currentRunner = null;
     if (error.name === 'AbortError') {
       if (midTurnSteerRequested) {
         midTurnSteerRequested = false;

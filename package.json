@@ -1,10 +1,10 @@
 {
   "name": "ripley-code",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "AI coding agent CLI powered by local LM Studio models and remote providers (Anthropic, OpenAI, OpenRouter)",
   "main": "ripley.js",
   "bin": {
-    "ripley": "./ripley.js"
+    "ripley": "ripley.js"
   },
   "scripts": {
     "postinstall": "node scripts/createRipleyDir.js || echo ripley: skipped dir creation"
@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "diff": "^8.0.3",
-    "glob": "^13.0.6"
+    "glob": "^13.0.6",
+    "ripley": "^0.0.2"
   }
 }
