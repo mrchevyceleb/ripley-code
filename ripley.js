@@ -4895,7 +4895,14 @@ Examples:
     const { modelName, pct, modeIcon, think } = getPromptData();
     const cols = process.stdout.columns || 120;
     const bgRow = `${BG}${' '.repeat(cols)}\x1b[0m`;
-    const content = `${BG}${FG}  │ ${modeIcon} [${modelName}]${think} ${ACCENT}ctx:${pct}%${FG} You → ${userText}\x1b[K\x1b[0m`;
+    // Prefix: "  | <mode> [model]<think> ctx:N% You -> " (approx 35-50 visible chars)
+    const prefixText = `  | ${modeIcon} [${modelName}]${think ? ' T' : ''} ctx:${pct}% You -> `;
+    const availWidth = Math.max(20, cols - prefixText.length - 2);
+    // Truncate user text to fit one line; show ellipsis if too long
+    const displayText = userText.length > availWidth
+      ? userText.slice(0, availWidth - 3) + '...'
+      : userText;
+    const content = `${BG}${FG}  │ ${modeIcon} [${modelName}]${think} ${ACCENT}ctx:${pct}%${FG} You → ${displayText}\x1b[K\x1b[0m`;
     return `${bgRow}\n${content}\n${bgRow}`;
   };
 
@@ -5018,7 +5025,14 @@ Examples:
     }
 
     // Repaint submitted input as a highlighted bar with vertical padding.
-    process.stdout.write(`\x1b[A\r${getHighlightedPrompt(trimmed)}\n\n`);
+    // Calculate how many terminal lines the original prompt+input occupied (for clearing)
+    const cols = process.stdout.columns || 120;
+    const promptPrefix = buildPromptPrefix().replace(/\x1b\[[^m]*m/g, ''); // strip ANSI for length
+    const totalVisibleLen = promptPrefix.length + trimmed.length;
+    const wrappedLines = Math.max(1, Math.ceil(totalVisibleLen / cols));
+    // Move up enough lines to clear the full wrapped prompt, then clear each line
+    const clearSeq = `\x1b[${wrappedLines}A` + '\x1b[2K\x1b[0G'.repeat(wrappedLines);
+    process.stdout.write(`${clearSeq}${getHighlightedPrompt(trimmed)}\n\n`);
 
     // Send message to AI
     await sendMessage(trimmed);
