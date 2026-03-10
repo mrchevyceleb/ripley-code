@@ -1,6 +1,6 @@
 {
   "name": "ripley-code",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "AI coding agent CLI powered by local LM Studio models and remote providers (Anthropic, OpenAI, OpenRouter)",
   "main": "ripley.js",
   "bin": {

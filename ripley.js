@@ -923,19 +923,29 @@ function resolveActivePromptMode() {
   return 'base';
 }
 
+// System prompt cache - avoids rebuilding identical prompt every message
+let _systemPromptCache = { key: null, value: '' };
+
 function buildFullSystemPrompt(promptMode = resolveActivePromptMode()) {
+  // Build cache key from prompt mode + instruction file modification times
+  const globalInstructions = globalConfig ? globalConfig.getInstructions() : null;
+  const instructions = config ? config.getInstructions() : null;
+  const cacheKey = `${promptMode}|${globalInstructions?.source || ''}|${instructions?.source || ''}`;
+
+  if (_systemPromptCache.key === cacheKey) {
+    return _systemPromptCache.value;
+  }
+
   const systemPrompt = promptManager ? promptManager.get(promptMode) : '';
   let fullSystemPrompt = systemPrompt || '';
-  // Global instructions first (~/.ripley/RIPLEY.md)
-  const globalInstructions = globalConfig ? globalConfig.getInstructions() : null;
   if (globalInstructions) {
-    fullSystemPrompt += `\n\n## Global Instructions (from ${globalInstructions.source})\n\n${globalInstructions.content}`;
+    fullSystemPrompt += `\n\n## Global Instructions\n\n${globalInstructions.content}`;
   }
-  // Project instructions override/extend (RIPLEY.md or .ripley/instructions.md)
-  const instructions = config ? config.getInstructions() : null;
   if (instructions) {
-    fullSystemPrompt += `\n\n## Project Instructions (from ${instructions.source})\n\n${instructions.content}`;
+    fullSystemPrompt += `\n\n## Project Instructions\n\n${instructions.content}`;
   }
+
+  _systemPromptCache = { key: cacheKey, value: fullSystemPrompt };
   return fullSystemPrompt;
 }
 
@@ -944,7 +954,7 @@ function estimateTokensForValue(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value);
   if (!text) return 0;
   if (tokenCounter) return tokenCounter.estimateTokens(text);
-  return Math.ceil(text.length / 4);
+  return Math.ceil(text.length / 3.5);
 }
 
 function estimatePromptTokensForMessages(messages, options = {}) {
@@ -2625,9 +2635,9 @@ async function sendMessage(message) {
 
   fullMessage += `\n\n## Request\n\n${message}${systemNote}`;
   if (hasVisionImages) {
-    fullMessage += '\n\n## Vision Guidance\n\nUse attached image content as the primary source of truth for this request. Do not call file tools unless the user explicitly asks for repository/file analysis.';
+    fullMessage += '\n\n[Attached images are primary source of truth. Only use file tools if user explicitly asks.]';
   } else if (imageAnalysis) {
-    fullMessage += '\n\n## Vision Guidance\n\nThe user pasted screenshot(s) which were analyzed by a vision AI. The Image Analysis section above is your primary source of truth for this request. Focus on describing and responding to the image content, not the project file listing. Do not call file tools unless the user explicitly asks for repository/file analysis.';
+    fullMessage += '\n\n[Image analysis above is primary source of truth. Focus on image content, not file listing.]';
   }
 
   try {
@@ -2805,16 +2815,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
 
   // Build messages array for LM Studio
   const messages = [];
-  const systemPrompt = promptManager.get(promptMode);
-  let fullSystemPrompt = systemPrompt || '';
-  const streamGlobalInst = globalConfig ? globalConfig.getInstructions() : null;
-  if (streamGlobalInst) {
-    fullSystemPrompt += `\n\n## Global Instructions (from ${streamGlobalInst.source})\n\n${streamGlobalInst.content}`;
-  }
-  const streamInstructions = config.getInstructions();
-  if (streamInstructions) {
-    fullSystemPrompt += `\n\n## Project Instructions (from ${streamInstructions.source})\n\n${streamInstructions.content}`;
-  }
+  const fullSystemPrompt = buildFullSystemPrompt(promptMode);
   if (fullSystemPrompt) {
     messages.push({ role: 'system', content: fullSystemPrompt });
   }
@@ -3514,17 +3515,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
 
   // Build messages array
   const messages = [];
-  const systemPrompt = promptManager.get(promptMode);
-  // Combine base prompt + global instructions + project instructions into one system message
-  let fullSystemPrompt = systemPrompt || '';
-  const agGlobalInst = globalConfig ? globalConfig.getInstructions() : null;
-  if (agGlobalInst) {
-    fullSystemPrompt += `\n\n## Global Instructions (from ${agGlobalInst.source})\n\n${agGlobalInst.content}`;
-  }
-  const instructions = config.getInstructions();
-  if (instructions) {
-    fullSystemPrompt += `\n\n## Project Instructions (from ${instructions.source})\n\n${instructions.content}`;
-  }
+  const fullSystemPrompt = buildFullSystemPrompt(promptMode);
   if (fullSystemPrompt) {
     messages.push({ role: 'system', content: fullSystemPrompt });
   }
@@ -4030,16 +4021,7 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
 
     // Build messages array
     const messages = [];
-    const systemPrompt = promptManager.get(promptMode);
-    let fullSystemPrompt = systemPrompt || '';
-    const compactGlobalInst = globalConfig ? globalConfig.getInstructions() : null;
-    if (compactGlobalInst) {
-      fullSystemPrompt += `\n\n## Global Instructions (from ${compactGlobalInst.source})\n\n${compactGlobalInst.content}`;
-    }
-    const compactInstructions = config.getInstructions();
-    if (compactInstructions) {
-      fullSystemPrompt += `\n\n## Project Instructions (from ${compactInstructions.source})\n\n${compactInstructions.content}`;
-    }
+    const fullSystemPrompt = buildFullSystemPrompt(promptMode);
     if (fullSystemPrompt) {
       messages.push({ role: 'system', content: fullSystemPrompt });
     }
@@ -4199,15 +4181,23 @@ async function processAIResponse(reply, originalMessage, options = {}) {
   const ctxLimit = modelRegistry.getContextLimit();
   const compactThreshold = Math.max(
     0.5,
-    (config.get('tokenWarningThreshold') || 0.8) - COMPACTION_SAFETY_BUFFER
+    (config.get('tokenWarningThreshold') || 0.65) - COMPACTION_SAFETY_BUFFER
   );
   if (projectedNextTokens / ctxLimit >= compactThreshold) {
     await compactHistory();
   } else {
-    // Trim history if too long (safety fallback)
+    // Token-aware history trim: cap at 50 messages OR 40% of context, whichever is smaller
     const historyLimit = config.get('historyLimit') || 50;
+    const tokenBudget = ctxLimit * 0.4;
     if (conversationHistory.length > historyLimit) {
       conversationHistory = conversationHistory.slice(-historyLimit);
+    }
+    // Also trim if history alone exceeds 40% of context
+    const historyTokens = estimateTokensForValue(conversationHistory);
+    if (historyTokens > tokenBudget && conversationHistory.length > 6) {
+      while (conversationHistory.length > 6 && estimateTokensForValue(conversationHistory) > tokenBudget) {
+        conversationHistory.shift();
+      }
     }
   }
   refreshIdleContextEstimate();
