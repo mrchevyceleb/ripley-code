@@ -4874,15 +4874,41 @@ Examples:
     const { modelName, pct, modeIcon, think } = getPromptData();
     const cols = process.stdout.columns || 120;
     const bgRow = `${BG}${' '.repeat(cols)}\x1b[0m`;
-    // Prefix: "  | <mode> [model]<think> ctx:N% You -> " (approx 35-50 visible chars)
-    const prefixText = `  | ${modeIcon} [${modelName}]${think ? ' T' : ''} ctx:${pct}% You -> `;
-    const availWidth = Math.max(20, cols - prefixText.length - 2);
-    // Truncate user text to fit one line; show ellipsis if too long
-    const displayText = userText.length > availWidth
-      ? userText.slice(0, availWidth - 3) + '...'
-      : userText;
-    const content = `${BG}${FG}  │ ${modeIcon} [${modelName}]${think} ${ACCENT}ctx:${pct}%${FG} You → ${displayText}\x1b[K\x1b[0m`;
-    return `${bgRow}\n${content}\n${bgRow}`;
+    const prefix = `  │ ${modeIcon} [${modelName}]${think} `;
+    const metaPrefix = `${ACCENT}ctx:${pct}%${FG} You → `;
+    // First line: prefix + meta + start of user text
+    const firstLinePrefix = `${prefix}`;
+    const metaPart = `ctx:${pct}% You → `;
+    const firstAvail = Math.max(20, cols - firstLinePrefix.length - metaPart.length - 1);
+    // Continuation lines: indented to align with user text
+    const contIndent = '  │   ';
+    const contAvail = Math.max(20, cols - contIndent.length - 1);
+
+    // Word-wrap user text
+    const words = userText.split(/(\s+)/);
+    const lines = [];
+    let currentLine = '';
+    let maxWidth = firstAvail;
+    for (const word of words) {
+      if (currentLine.length + word.length > maxWidth && currentLine.length > 0) {
+        lines.push(currentLine);
+        currentLine = word.replace(/^\s+/, ''); // trim leading space on new line
+        maxWidth = contAvail;
+      } else {
+        currentLine += word;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+
+    // Build output lines
+    const outputLines = [];
+    outputLines.push(bgRow);
+    outputLines.push(`${BG}${FG}${prefix}${metaPrefix}${lines[0] || ''}\x1b[K\x1b[0m`);
+    for (let i = 1; i < lines.length; i++) {
+      outputLines.push(`${BG}${FG}${contIndent}${lines[i]}\x1b[K\x1b[0m`);
+    }
+    outputLines.push(bgRow);
+    return outputLines.join('\n');
   };
 
   const runStartupUiSelfCheck = () => {
@@ -5009,8 +5035,12 @@ Examples:
     const promptPrefix = buildPromptPrefix().replace(/\x1b\[[^m]*m/g, ''); // strip ANSI for length
     const totalVisibleLen = promptPrefix.length + trimmed.length;
     const wrappedLines = Math.max(1, Math.ceil(totalVisibleLen / cols));
-    // Move up enough lines to clear the full wrapped prompt, then clear each line
-    const clearSeq = `\x1b[${wrappedLines}A` + '\x1b[2K\x1b[0G'.repeat(wrappedLines);
+    // Move up and clear each line individually (move up one, clear, repeat)
+    let clearSeq = '';
+    for (let i = 0; i < wrappedLines; i++) {
+      clearSeq += '\x1b[A\x1b[2K';
+    }
+    clearSeq += '\x1b[0G'; // return to column 0
     process.stdout.write(`${clearSeq}${getHighlightedPrompt(trimmed)}\n\n`);
 
     // Send message to AI
