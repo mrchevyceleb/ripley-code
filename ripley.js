@@ -3560,15 +3560,23 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
         // Truncate detail to prevent spinner line from wrapping past terminal width
         const maxDetail = Math.max(20, (process.stdout.columns || 120) - 30);
         if (detail.length > maxDetail) detail = detail.slice(0, maxDetail - 3) + '...';
-        currentStatus = detail
-          ? `Step ${stepCount} · ${toolMsg} ${detail}`
-          : `Step ${stepCount} · ${toolMsg}`;
+        // Count pending (not yet resolved) tool calls to detect parallel execution
+        const pendingCount = toolCallsDisplayed.filter(t => t.success === undefined).length;
+        if (pendingCount > 0) {
+          currentStatus = `Running ${pendingCount + 1} tools... · ${toolMsg} ${detail}`;
+        } else {
+          currentStatus = detail
+            ? `Step ${stepCount} · ${toolMsg} ${detail}`
+            : `Step ${stepCount} · ${toolMsg}`;
+        }
         updateSpinner();
         toolCallsDisplayed.push({ tool, args, stepNum: stepCount });
       },
-      onToolResult: (tool, success, result) => {
+      onToolResult: (tool, success, result, elapsed) => {
         if (toolCallsDisplayed.length > 0) {
-          const last = toolCallsDisplayed[toolCallsDisplayed.length - 1];
+          // Find the matching entry (first unresolved entry for this tool, for parallel correctness)
+          const last = toolCallsDisplayed.find(t => t.tool === tool && t.success === undefined)
+            || toolCallsDisplayed[toolCallsDisplayed.length - 1];
           last.success = success;
           if (result?._mcp && success) {
             last.mcpPreview = JSON.stringify(result.result || '').slice(0, 100);
@@ -3585,6 +3593,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
             ? `${c.red}✗${c.reset}`
             : `${c.green}✓${c.reset}`;
           const errInfo = (!success && last.errorMsg) ? ` ${c.red}${last.errorMsg}${c.reset}` : '';
+          const timing = elapsed ? ` ${c.dim}(${(elapsed / 1000).toFixed(1)}s)${c.reset}` : '';
           // Clear spinner line, print permanent step, restart spinner on next line
           if (promptDuringWork) {
             // Clear prompt line, move up and clear spinner line
@@ -3592,7 +3601,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           } else {
             process.stdout.write(`\x1b[2K\x1b[0G`);
           }
-          console.log(`${borderRenderer.prefix('tool')}${status} ${c.dim}${last.stepNum}. ${icon} ${label}${errInfo}${c.reset}`);
+          console.log(`${borderRenderer.prefix('tool')}${status} ${c.dim}${last.stepNum}. ${icon} ${label}${errInfo}${c.reset}${timing}`);
           if (promptDuringWork && renderWorkingPrompt) {
             // Re-render spinner + prompt below the permanent output
             renderWorkingPrompt();
@@ -3872,7 +3881,8 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       signal: currentAbortController.signal,
       reasoningEffort: agenticModelMeta?.reasoningEffort,
       tools: interactionMode === 'plan' ? READ_ONLY_TOOLS : undefined,
-      readOnly: interactionMode === 'plan'
+      readOnly: interactionMode === 'plan',
+      contextLimit: modelRegistry.getContextLimit()
     });
 
     // Update context usage from actual API token count, or estimate from messages
