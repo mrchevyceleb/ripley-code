@@ -4996,10 +4996,11 @@ Examples:
   // When pasting multi-line text, readline fires the callback for the first line,
   // then subsequent lines arrive as new 'line' events. We detect paste by
   // buffering lines that arrive within PASTE_DELAY_MS of each other.
-  const PASTE_DELAY_MS = 80;
+  const PASTE_DELAY_MS = 200; // 200ms to handle Windows Terminal paste confirmation dialog latency
   let pasteBuffer = [];
   let pasteTimer = null;
   let waitingForInput = false;
+  let lastFlushTime = 0; // Track when paste buffer last flushed (to catch stragglers)
 
   showGeminiKeyPrompt = (callback) => {
     awaitingGeminiKey = true;
@@ -5092,6 +5093,7 @@ Examples:
   const flushPasteBuffer = async () => {
     // Stop accepting lines while we process this input
     waitingForInput = false;
+    lastFlushTime = Date.now();
     const fullInput = pasteBuffer.join('\n');
     const lineCount = pasteBuffer.length;
     pasteBuffer = [];
@@ -5160,6 +5162,17 @@ Examples:
         const { resolve } = pendingHumanQuestion;
         pendingHumanQuestion = null;
         resolve(answer);
+        return;
+      }
+
+      // Straggler paste lines: arrived after flush but within 500ms and before AI started.
+      // This happens on Windows when the paste confirmation dialog adds latency between lines.
+      if (!currentAbortController && lastFlushTime && (Date.now() - lastFlushTime) < 500) {
+        const trimmed = String(input || '').trim();
+        if (trimmed) {
+          appendDebugLog(`[paste-straggler] Dropped line arrived ${Date.now() - lastFlushTime}ms after flush: ${trimmed.slice(0, 60)}\n`);
+          console.log(`${PAD}${c.yellow}Lines were dropped from your paste.${c.reset} ${c.dim}Try pasting again, or disable the paste warning in Windows Terminal settings.${c.reset}`);
+        }
         return;
       }
 
