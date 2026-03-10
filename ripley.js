@@ -2611,17 +2611,7 @@ async function sendMessage(message) {
 
 async function sendStreamingMessage(message, images = [], rawMessage = '') {
   // Contextual thinking message derived from user input
-  const streamUserText = (rawMessage || message || '').trim().replace(/[\r\n]+/g, ' ');
-  let thinkingMessage;
-  if (streamUserText.length > 0) {
-    let summary = streamUserText;
-    if (summary.length > 45) {
-      summary = summary.substring(0, 45).replace(/\s+\S*$/, '') + '...';
-    }
-    thinkingMessage = `Thinking about "${summary}"`;
-  } else {
-    thinkingMessage = 'Thinking...';
-  }
+  const thinkingMessage = 'Thinking...';
   const generatingMessages = [
     'Writing code...',
     'Crafting response...',
@@ -3366,18 +3356,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     ask_human: '💬 Asking you'
   };
 
-  // Contextual thinking message from user input
-  const agenticUserText = (rawMessage || message || '').trim().replace(/[\r\n]+/g, ' ');
-  let agenticThinking;
-  if (agenticUserText.length > 0) {
-    let summary = agenticUserText;
-    if (summary.length > 45) {
-      summary = summary.substring(0, 45).replace(/\s+\S*$/, '') + '...';
-    }
-    agenticThinking = `Thinking about "${summary}"`;
-  } else {
-    agenticThinking = 'Thinking...';
-  }
+  const agenticThinking = 'Thinking...';
 
   // Reset prompt-during-work state from any previous run
   promptDuringWork = false;
