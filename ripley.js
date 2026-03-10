@@ -5041,6 +5041,8 @@ Examples:
       clearSeq += '\x1b[A\x1b[2K';
     }
     clearSeq += '\x1b[0G'; // return to column 0
+    // Clear readline buffer so the old input doesn't leak into the working prompt
+    rl.write(null, { ctrl: true, name: 'u' });
     process.stdout.write(`${clearSeq}${getHighlightedPrompt(trimmed)}\n\n`);
 
     // Send message to AI
