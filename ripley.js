@@ -25,7 +25,7 @@ const os = require('os');
 const FileManager = require('./lib/fileManager');
 const ContextBuilder = require('./lib/contextBuilder');
 const CommandRunner = require('./lib/commandRunner');
-const Config = require('./lib/config');
+const { Config, GlobalConfig, GLOBAL_RIPLEY_DIR } = require('./lib/config');
 const HistoryManager = require('./lib/historyManager');
 const Completer = require('./lib/completer');
 const TokenCounter = require('./lib/tokenCounter');
@@ -101,6 +101,7 @@ const c = new Proxy(rawColors, {
 // =============================================================================
 
 let projectDir = process.cwd();
+let globalConfig = null;
 let config = null;
 let fileManager = null;
 let contextBuilder = null;
@@ -388,7 +389,7 @@ ${P}${c.orange}${c.dim}System Commands:${c.reset}
 ${P}${c.yellow}/run <cmd>${c.reset}          Run a shell command
 ${P}${c.yellow}/undo${c.reset}               Show recent backups
 ${P}${c.yellow}/restore <path>${c.reset}     Restore file from backup
-${P}${c.yellow}/commands${c.reset}           List custom commands (~/.ripley/Commands/)
+${P}${c.yellow}/commands${c.reset}           List custom commands (~/.ripley/commands/)
 ${P}${c.yellow}/version${c.reset}            Show version
 ${P}${c.yellow}/help${c.reset}               Show this help
 ${P}${c.yellow}/exit${c.reset}               Exit Ripley
@@ -410,6 +411,8 @@ ${c.reset}`);
 
 function initProject() {
   // Initialize all components
+  globalConfig = new GlobalConfig();
+  globalConfig.ensureDir(); // Ensure ~/.ripley/ structure exists on every run
   config = new Config(projectDir);
   fileManager = new FileManager(projectDir);
   contextBuilder = new ContextBuilder(fileManager, config.get('ignorePatterns'));
@@ -464,14 +467,8 @@ function initProject() {
 
   // Try to get Gemini API key from: 1) project config, 2) global config, 3) env var
   let geminiKey = config.get('geminiApiKey');
-  if (!geminiKey) {
-    const globalConfigPath = path.join(os.homedir(), '.ripley', 'config.json');
-    try {
-      if (fs.existsSync(globalConfigPath)) {
-        const globalConfig = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
-        geminiKey = globalConfig.geminiApiKey;
-      }
-    } catch {}
+  if (!geminiKey && globalConfig) {
+    geminiKey = globalConfig.get('geminiApiKey');
   }
   geminiKey = geminiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   visionAnalyzer = new VisionAnalyzer({ apiKey: geminiKey });
@@ -495,6 +492,12 @@ function initProject() {
   // Load priority files
   contextBuilder.loadPriorityFiles();
   console.log(`${PAD}${c.green}✓${c.reset} Context: ${contextBuilder.getLoadedFiles().length} files loaded`);
+
+  // Check for global instructions (~/.ripley/RIPLEY.md)
+  const globalInst = globalConfig.getInstructions();
+  if (globalInst) {
+    console.log(`${PAD}${c.green}✓${c.reset} Global instructions loaded ${c.dim}(${globalInst.source})${c.reset}`);
+  }
 
   // Check for project instructions (RIPLEY.md or .ripley/instructions.md)
   const instructions = config.getInstructions();
@@ -529,17 +532,7 @@ function initProject() {
   }
 
   // Initialize MCP client (project config -> global config -> env var)
-  let mcpUrl = config.get('mcpUrl');
-  if (!mcpUrl) {
-    const globalConfigPath = path.join(os.homedir(), '.ripley', 'config.json');
-    try {
-      if (fs.existsSync(globalConfigPath)) {
-        const globalConfig = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
-        mcpUrl = globalConfig.mcpUrl;
-      }
-    } catch {}
-  }
-  mcpUrl = mcpUrl || process.env.MCP_SERVER_URL || null;
+  let mcpUrl = config.get('mcpUrl') || globalConfig.get('mcpUrl') || process.env.MCP_SERVER_URL || null;
   mcpClient = new McpClient(mcpUrl ? { url: mcpUrl } : {});
   setMcpClient(mcpClient);
 
@@ -824,55 +817,68 @@ async function searchInFiles(searchText) {
 }
 
 // =============================================================================
-// CUSTOM COMMANDS (~/.ripley/Commands/)
+// CUSTOM COMMANDS (~/.ripley/commands/ and .ripley/commands/)
 // =============================================================================
 
-const COMMANDS_DIR = path.join(require('os').homedir(), '.ripley', 'Commands');
+const GLOBAL_COMMANDS_DIR = path.join(require('os').homedir(), '.ripley', 'commands');
 
 /**
- * Load a custom command from ~/.ripley/Commands/<name>.md
+ * Load a custom command. Project-local (.ripley/commands/) takes precedence over global (~/.ripley/commands/).
  * Returns { name, content, source } or null if not found.
  */
 function loadCustomCommand(cmd) {
-  // Strip leading slash: /push -> push
   const name = cmd.replace(/^\//, '');
-  const filePath = path.join(COMMANDS_DIR, `${name}.md`);
-
-  if (!fs.existsSync(filePath)) return null;
-
-  try {
-    const content = fs.readFileSync(filePath, 'utf-8').trim();
-    return { name, content, source: filePath };
-  } catch {
-    return null;
+  // Check project-local first
+  const localDir = path.join(projectDir, '.ripley', 'commands');
+  const localPath = path.join(localDir, `${name}.md`);
+  if (fs.existsSync(localPath)) {
+    try {
+      return { name, content: fs.readFileSync(localPath, 'utf-8').trim(), source: localPath };
+    } catch {}
   }
+  // Then global
+  const globalPath = path.join(GLOBAL_COMMANDS_DIR, `${name}.md`);
+  if (fs.existsSync(globalPath)) {
+    try {
+      return { name, content: fs.readFileSync(globalPath, 'utf-8').trim(), source: globalPath };
+    } catch {}
+  }
+  return null;
 }
 
 /**
- * List all available custom commands from ~/.ripley/Commands/
+ * List all available custom commands from both global and local directories.
  */
 function listCustomCommands() {
-  if (!fs.existsSync(COMMANDS_DIR)) {
-    console.log(`\n${PAD}${c.dim}No custom commands directory found at ${COMMANDS_DIR}${c.reset}\n`);
-    return;
+  const localDir = path.join(projectDir, '.ripley', 'commands');
+  const dirs = [
+    { dir: GLOBAL_COMMANDS_DIR, label: 'Global', scope: 'global' },
+    { dir: localDir, label: 'Project', scope: 'local' }
+  ];
+
+  let anyFound = false;
+  for (const { dir, label } of dirs) {
+    if (!fs.existsSync(dir)) continue;
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.md')).sort();
+    if (files.length === 0) continue;
+
+    if (!anyFound) console.log();
+    anyFound = true;
+    console.log(`${PAD}${c.cyan}${label} Commands${c.reset} ${c.dim}(${dir})${c.reset}\n`);
+    for (const file of files) {
+      const name = file.replace('.md', '');
+      const content = fs.readFileSync(path.join(dir, file), 'utf-8');
+      const lines = content.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+      const desc = lines[0] || '';
+      console.log(`${PAD}${c.green}/${name}${c.reset}  ${c.dim}${desc.slice(0, 60)}${c.reset}`);
+    }
+    console.log();
   }
 
-  const files = fs.readdirSync(COMMANDS_DIR).filter(f => f.endsWith('.md')).sort();
-  if (files.length === 0) {
-    console.log(`\n${PAD}${c.dim}No custom commands found in ${COMMANDS_DIR}${c.reset}\n`);
-    return;
+  if (!anyFound) {
+    console.log(`\n${PAD}${c.dim}No custom commands found.${c.reset}`);
+    console.log(`${PAD}${c.dim}Add .md files to ~/.ripley/commands/ (global) or .ripley/commands/ (project).${c.reset}\n`);
   }
-
-  console.log(`\n${PAD}${c.cyan}Custom Commands${c.reset} ${c.dim}(${COMMANDS_DIR})${c.reset}\n`);
-  for (const file of files) {
-    const name = file.replace('.md', '');
-    // Read first non-empty, non-heading line as description
-    const content = fs.readFileSync(path.join(COMMANDS_DIR, file), 'utf-8');
-    const lines = content.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
-    const desc = lines[0] || '';
-    console.log(`${PAD}${c.green}/${name}${c.reset}  ${c.dim}${desc.slice(0, 60)}${c.reset}`);
-  }
-  console.log();
 }
 
 function normalizeProviderKey(raw) {
@@ -919,8 +925,14 @@ function resolveActivePromptMode() {
 
 function buildFullSystemPrompt(promptMode = resolveActivePromptMode()) {
   const systemPrompt = promptManager ? promptManager.get(promptMode) : '';
-  const instructions = config ? config.getInstructions() : null;
   let fullSystemPrompt = systemPrompt || '';
+  // Global instructions first (~/.ripley/RIPLEY.md)
+  const globalInstructions = globalConfig ? globalConfig.getInstructions() : null;
+  if (globalInstructions) {
+    fullSystemPrompt += `\n\n## Global Instructions (from ${globalInstructions.source})\n\n${globalInstructions.content}`;
+  }
+  // Project instructions override/extend (RIPLEY.md or .ripley/instructions.md)
+  const instructions = config ? config.getInstructions() : null;
   if (instructions) {
     fullSystemPrompt += `\n\n## Project Instructions (from ${instructions.source})\n\n${instructions.content}`;
   }
@@ -2116,15 +2128,16 @@ async function handleCommand(input) {
     case '/mcp': {
       const mcpSubcommand = args.trim().toLowerCase();
 
-      // /mcp disconnect - clear saved URL and reset client
+      // /mcp disconnect - clear saved URL from both scopes and reset client
       if (mcpSubcommand === 'disconnect') {
         config.set('mcpUrl', null);
+        globalConfig.set('mcpUrl', null);
         mcpClient.url = '';
         mcpClient.sessionId = null;
         mcpClient.initialized = false;
         mcpClient.serverInfo = null;
         if (statusBar) statusBar.update({ mcpConnected: false });
-        console.log(`\n${PAD}${c.green}✓${c.reset} MCP disconnected and URL cleared.\n`);
+        console.log(`\n${PAD}${c.green}✓${c.reset} MCP disconnected and URL cleared (local + global).\n`);
         return true;
       }
 
@@ -2308,13 +2321,23 @@ async function handleCommand(input) {
             }
 
             if (testOk) {
-              config.set('mcpUrl', finalUrl);
               if (statusBar) statusBar.update({ mcpConnected: true });
               const info = mcpClient.getStatus();
               const label = info.serverName || 'MCP server';
               const ver = info.serverVersion ? ` v${info.serverVersion}` : '';
               console.log(`${PAD}${c.green}✓ Connected${c.reset} to ${label}${ver}`);
-              console.log(`${PAD}${c.dim}  URL saved to config${c.reset}`);
+
+              // Ask scope: local (this project) or global (all projects)
+              console.log();
+              const scopeInput = await askQuestion(`${PAD}${c.cyan}Save for this project only, or all projects? (local/global): ${c.reset}`);
+              const scope = scopeInput.trim().toLowerCase();
+              if (scope === 'global' || scope === 'g') {
+                globalConfig.set('mcpUrl', finalUrl);
+                console.log(`${PAD}${c.dim}  URL saved globally (~/.ripley/config.json)${c.reset}`);
+              } else {
+                config.set('mcpUrl', finalUrl);
+                console.log(`${PAD}${c.dim}  URL saved locally (.ripley/config.json)${c.reset}`);
+              }
 
               // Show tool count
               try {
@@ -2368,7 +2391,18 @@ async function handleCommand(input) {
       console.log(`\n${PAD}${c.green}  ✓ Set ${setKey} = ${setValue}${c.reset}\n`);
       return true;
 
-    case '/instructions':
+    case '/instructions': {
+      // Show global instructions if they exist
+      const existingGlobalInst = globalConfig.getInstructions();
+      if (existingGlobalInst) {
+        console.log(`\n${PAD}${c.cyan}Global Instructions (${existingGlobalInst.source}):${c.reset}`);
+        const gPreview = existingGlobalInst.content.substring(0, 300);
+        console.log(`${PAD}${c.dim}${gPreview}${existingGlobalInst.content.length > 300 ? '...' : ''}${c.reset}`);
+        console.log(`${PAD}${c.dim}Edit: ${globalConfig.instructionsPath}${c.reset}`);
+      } else {
+        console.log(`\n${PAD}${c.dim}No global instructions. Create ~/.ripley/RIPLEY.md to add them.${c.reset}`);
+      }
+      // Show project instructions
       const existingInstructions = config.getInstructions();
       if (existingInstructions) {
         console.log(`\n${PAD}${c.cyan}Project Instructions (${existingInstructions.source}):${c.reset}`);
@@ -2384,6 +2418,7 @@ async function handleCommand(input) {
         console.log(`${PAD}${c.dim}Edit: ${path.join(projectDir, 'RIPLEY.md')}${c.reset}\n`);
       }
       return true;
+    }
 
     case '/run':
     case '/exec':
@@ -2449,7 +2484,7 @@ async function handleCommand(input) {
       return true;
 
     default:
-      // Check for custom commands in ~/.ripley/Commands/
+      // Check for custom commands (project .ripley/commands/ first, then global ~/.ripley/commands/)
       const customResult = loadCustomCommand(cmd);
       if (customResult) {
         console.log(`\n${PAD}${c.cyan}Running custom command: ${customResult.name}${c.reset}`);
@@ -2771,8 +2806,12 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
   // Build messages array for LM Studio
   const messages = [];
   const systemPrompt = promptManager.get(promptMode);
-  const streamInstructions = config.getInstructions();
   let fullSystemPrompt = systemPrompt || '';
+  const streamGlobalInst = globalConfig ? globalConfig.getInstructions() : null;
+  if (streamGlobalInst) {
+    fullSystemPrompt += `\n\n## Global Instructions (from ${streamGlobalInst.source})\n\n${streamGlobalInst.content}`;
+  }
+  const streamInstructions = config.getInstructions();
   if (streamInstructions) {
     fullSystemPrompt += `\n\n## Project Instructions (from ${streamInstructions.source})\n\n${streamInstructions.content}`;
   }
@@ -3476,9 +3515,13 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
   // Build messages array
   const messages = [];
   const systemPrompt = promptManager.get(promptMode);
-  const instructions = config.getInstructions();
-  // Combine base prompt + project instructions into one system message
+  // Combine base prompt + global instructions + project instructions into one system message
   let fullSystemPrompt = systemPrompt || '';
+  const agGlobalInst = globalConfig ? globalConfig.getInstructions() : null;
+  if (agGlobalInst) {
+    fullSystemPrompt += `\n\n## Global Instructions (from ${agGlobalInst.source})\n\n${agGlobalInst.content}`;
+  }
+  const instructions = config.getInstructions();
   if (instructions) {
     fullSystemPrompt += `\n\n## Project Instructions (from ${instructions.source})\n\n${instructions.content}`;
   }
@@ -3988,8 +4031,12 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
     // Build messages array
     const messages = [];
     const systemPrompt = promptManager.get(promptMode);
-    const compactInstructions = config.getInstructions();
     let fullSystemPrompt = systemPrompt || '';
+    const compactGlobalInst = globalConfig ? globalConfig.getInstructions() : null;
+    if (compactGlobalInst) {
+      fullSystemPrompt += `\n\n## Global Instructions (from ${compactGlobalInst.source})\n\n${compactGlobalInst.content}`;
+    }
+    const compactInstructions = config.getInstructions();
     if (compactInstructions) {
       fullSystemPrompt += `\n\n## Project Instructions (from ${compactInstructions.source})\n\n${compactInstructions.content}`;
     }
@@ -4968,17 +5015,9 @@ Examples:
   };
 
   const saveGeminiKey = (key) => {
-    const globalDir = path.join(os.homedir(), '.ripley');
-    const globalConfigPath = path.join(globalDir, 'config.json');
-    try {
-      fs.mkdirSync(globalDir, { recursive: true });
-      let gc = {};
-      if (fs.existsSync(globalConfigPath)) {
-        gc = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
-      }
-      gc.geminiApiKey = key;
-      fs.writeFileSync(globalConfigPath, JSON.stringify(gc, null, 2));
-    } catch {}
+    if (globalConfig) {
+      globalConfig.set('geminiApiKey', key);
+    }
     visionAnalyzer = new VisionAnalyzer({ apiKey: key });
     console.log(`\n${PAD}${c.green}✓ Gemini API key saved globally${c.reset}`);
     console.log(`${PAD}${c.dim}Vision is now enabled for all projects${c.reset}\n`);
