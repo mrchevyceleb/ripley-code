@@ -2657,6 +2657,7 @@ async function sendMessage(message) {
 async function sendStreamingMessage(message, images = [], rawMessage = '') {
   // Contextual thinking message derived from user input
   const thinkingMessage = 'Thinking...';
+  let blockStatusOverride = null; // Set by onBlockProgress to show what's happening inside suppressed XML blocks
   const generatingMessages = [
     'Writing code...',
     'Crafting response...',
@@ -2683,7 +2684,10 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     tickCount++;
 
     let currentMessage;
-    if (isGenerating) {
+    if (blockStatusOverride) {
+      // Show what's happening inside a suppressed XML block (file write, command, etc.)
+      currentMessage = blockStatusOverride;
+    } else if (isGenerating) {
       // Cycle generating messages every ~2 seconds
       if (tickCount % 20 === 0) {
         messageIndex = (messageIndex + 1) % generatingMessages.length;
@@ -2856,10 +2860,25 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
   const markdownRenderer = new MarkdownRenderer();
 
   const streamHandler = new StreamHandler({
+    onBlockProgress: (blockType, chars, done) => {
+      if (done) {
+        blockStatusOverride = null;
+        return;
+      }
+      // Show progress for suppressed blocks so the user knows what's happening
+      const size = chars > 1000 ? `${(chars / 1000).toFixed(1)}k` : `${chars}`;
+      if (blockType === 'file_operation') {
+        blockStatusOverride = `Writing file... (${size} chars)`;
+      } else if (blockType === 'run_command') {
+        blockStatusOverride = `Generating command...`;
+      }
+      // Don't override for think blocks - the default "Thinking..." is fine
+    },
     onToken: (token) => {
       // Transition from thinking to generating on first token
       if (!firstTokenReceived) {
         firstTokenReceived = true;
+        blockStatusOverride = null;
         startGenerating();
       }
       tokenCount++;
@@ -3566,6 +3585,9 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       onCommandComplete: hookManager ? (command, result) => {
         hookManager.runHooks('afterCommand', { command, commandRan: true }).catch(() => {});
       } : null,
+      onContextUpdate: (promptTokens, ctxLimit) => {
+        setContextEstimate(promptTokens, { persistActual: true });
+      },
       onToolCall: (tool, args) => {
         stepCount++;
         const toolMsg = toolMessages[tool] || '🔧 Using';
@@ -3938,7 +3960,33 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       cleaned = cleaned.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
       cleaned = cleaned.replace(/^[\s\S]*?<\/think>\s*/i, '');
       cleaned = cleaned.replace(/^[\s\S]*?<\/thinking>\s*/i, '');
-      await processAIResponse(cleaned.trim(), rawMessage || message, {
+
+      // Build a compact tool summary so the model remembers what it did on the next turn.
+      // Without this, the model re-reads every file because tool call history is lost.
+      let toolSummary = '';
+      if (toolCallsDisplayed.length > 0) {
+        const filesRead = new Set();
+        const filesWritten = new Set();
+        const commandsRun = [];
+        const mcpCalls = [];
+        for (const tc of toolCallsDisplayed) {
+          const p = tc.args?.path || '';
+          if (tc.tool === 'read_file' && p) filesRead.add(p);
+          else if ((tc.tool === 'create_file' || tc.tool === 'edit_file') && p) filesWritten.add(p);
+          else if (tc.tool === 'run_command' && tc.args?.command) commandsRun.push(tc.args.command.substring(0, 100));
+          else if (tc.tool === 'call_mcp' && tc.args?.tool) mcpCalls.push(tc.args.tool);
+        }
+        const parts = [];
+        if (filesRead.size > 0) parts.push(`Read: ${[...filesRead].join(', ')}`);
+        if (filesWritten.size > 0) parts.push(`Wrote: ${[...filesWritten].join(', ')}`);
+        if (commandsRun.length > 0) parts.push(`Ran: ${commandsRun.join('; ')}`);
+        if (mcpCalls.length > 0) parts.push(`MCP: ${[...new Set(mcpCalls)].join(', ')}`);
+        if (parts.length > 0) {
+          toolSummary = `[Tool actions: ${parts.join(' | ')}]\n\n`;
+        }
+      }
+
+      await processAIResponse(toolSummary + cleaned.trim(), rawMessage || message, {
         skipTokenEstimate: true,
         executeActions: false
       });
