@@ -1,155 +1,57 @@
 {
-  "default": "gpt-oss",
+  "default": "silverback",
   "models": {
-    "gpt-oss": {
-      "name": "GPT-OSS 20B",
-      "id": "openai/gpt-oss-20b",
-      "vram": "~12 GB",
-      "contextLimit": 131072,
-      "supportsThinking": true,
-      "preserveReasoning": true,
-      "prompt": "code-agent-gptoss",
-      "thinkingBudgets": { "low": 1024, "medium": 4096, "high": 16384 },
-      "inferenceSettings": {
-        "temperature": 1,
-        "topP": 1
-      },
-      "tags": [
-        "fast",
-        "agentic",
-        "coding",
-        "tool-calling"
-      ],
-      "tier": "fast",
-      "description": "Fast open tool-calling model. MoE, 3.6B active.",
-      "provider": "local"
-    },
-    "coder": {
-      "name": "Qwen3 Coder 30B",
-      "id": "qwen/qwen3-coder-30b",
-      "vram": "~18 GB",
-      "contextLimit": 32768,
+    "silverback": {
+      "name": "Silverback",
+      "id": "silverback",
+      "contextLimit": 200000,
+      "maxOutputTokens": 131072,
       "supportsThinking": false,
-      "prompt": "code-agent-qwen",
-      "inferenceSettings": {
-        "temperature": 0.7,
-        "topP": 0.8
-      },
-      "tags": [
-        "coding",
-        "reasoning",
-        "fast"
-      ],
-      "tier": "coding",
-      "description": "Primary coding model. MoE, 3B active, no thinking mode.",
-      "provider": "local"
+      "prompt": "code-agent",
+      "inferenceSettings": { "temperature": 0.7, "topP": 0.9 },
+      "tags": ["coding", "max-quality", "agentic", "tool-calling"],
+      "tier": "silverback",
+      "description": "Best quality. Heavy coding, full builds, complex tasks.",
+      "provider": "monkey"
     },
-    "qwen35": {
-      "name": "Qwen3.5 35B A3B",
-      "id": "qwen/qwen3.5-35b-a3b",
-      "vram": "21 GB",
-      "contextLimit": 32768,
-      "supportsThinking": true,
-      "prompt": "code-agent-qwen",
-      "thinkingBudgets": { "low": 1024, "medium": 4096, "high": 12288 },
-      "inferenceSettings": {
-        "temperature": 0.7,
-        "topP": 0.8
-      },
-      "tags": [
-        "agentic",
-        "coding",
-        "reasoning"
-      ],
-      "tier": "general",
-      "description": "Big single-shot tasks. MoE, thinks by default, 256K context.",
-      "provider": "local"
-    },
-    "glm": {
-      "name": "GLM 4.7 Flash",
-      "id": "zai-org/glm-4.7-flash",
-      "vram": "~18 GB",
-      "contextLimit": 71680,
-      "supportsThinking": true,
-      "prompt": "code-agent-glm",
-      "thinkingBudgets": { "low": 1024, "medium": 4096, "high": 16384 },
-      "inferenceSettings": {
-        "temperature": 0.7,
-        "topP": 1,
-        "repeatPenalty": 1
-      },
-      "tags": [
-        "fast",
-        "agentic",
-        "tool-calling"
-      ],
-      "tier": "fast",
-      "description": "Fast agentic model. MoE with MLA, 200K context, 3B active.",
-      "provider": "local"
-    },
-    "qwen35s": {
-      "name": "Qwen3.5 9B",
-      "id": "qwen/qwen3.5-9b",
-      "vram": "~23 GB @ 124K ctx",
-      "contextLimit": 124604,
-      "supportsThinking": true,
-      "prompt": "code-agent-qwen",
-      "thinkingBudgets": { "low": 512, "medium": 2048, "high": 8192 },
-      "inferenceSettings": {
-        "temperature": 0.8,
-        "topP": 0.9,
-        "repeatPenalty": 1.05
-      },
-      "tags": [
-        "fast",
-        "vision",
-        "agentic",
-        "reasoning",
-        "tool-calling"
-      ],
-      "tier": "fast",
-      "description": "Lightweight Qwen3.5 with vision, tool use, and reasoning. Only 6.5 GB.",
-      "provider": "local"
-    },
-    "nemotron": {
-      "name": "Nemotron 3 Nano 30B",
-      "id": "nvidia/nemotron-3-nano",
-      "vram": "19.3 GB",
-      "contextLimit": 32768,
-      "supportsThinking": true,
-      "prompt": "code-agent-nemotron",
-      "thinkingBudgets": { "low": 1024, "medium": 4096, "high": 12288 },
-      "inferenceSettings": {
-        "temperature": 0.6,
-        "topP": 0.95
-      },
-      "tags": [
-        "fast",
-        "agentic",
-        "coding"
-      ],
-      "tier": "fast",
-      "description": "Hybrid Mamba-2/Transformer MoE. 1M context capable, 3.5B active.",
-      "provider": "local"
-    },
-    "max": {
-      "name": "Qwen3 Coder Next 80B",
-      "id": "qwen/qwen3-coder-next-80b",
-      "vram": "45.2 GB",
-      "contextLimit": 131072,
+    "mandrill": {
+      "name": "Mandrill",
+      "id": "mandrill",
+      "contextLimit": 262000,
+      "maxOutputTokens": 65536,
       "supportsThinking": false,
-      "prompt": "code-agent-qwen",
-      "inferenceSettings": {
-        "temperature": 0.7,
-        "topP": 0.8
-      },
-      "tags": [
-        "coding",
-        "max-quality"
-      ],
-      "tier": "max",
-      "description": "Maximum quality. Slow (spills to CPU RAM).",
-      "provider": "local"
+      "prompt": "code-agent",
+      "inferenceSettings": { "temperature": 0.7, "topP": 0.9 },
+      "tags": ["coding", "balanced", "agentic", "tool-calling"],
+      "tier": "mandrill",
+      "description": "Balanced. Everyday coding, solid quality + speed.",
+      "provider": "monkey"
+    },
+    "gibbon": {
+      "name": "Gibbon",
+      "id": "gibbon",
+      "contextLimit": 262000,
+      "maxOutputTokens": 65536,
+      "supportsThinking": false,
+      "prompt": "code-agent",
+      "inferenceSettings": { "temperature": 0.7, "topP": 0.9 },
+      "tags": ["fast", "quick-fixes", "tool-calling"],
+      "tier": "gibbon",
+      "description": "Fast. Quick fixes, autocomplete, rapid iteration.",
+      "provider": "monkey"
+    },
+    "tamarin": {
+      "name": "Tamarin",
+      "id": "tamarin",
+      "contextLimit": 256000,
+      "maxOutputTokens": 65536,
+      "supportsThinking": false,
+      "prompt": "code-agent",
+      "inferenceSettings": { "temperature": 0.7, "topP": 0.9 },
+      "tags": ["budget", "simple-tasks", "tool-calling"],
+      "tier": "tamarin",
+      "description": "Budget. Simple tasks, boilerplate, routine work.",
+      "provider": "monkey"
     }
   }
 }

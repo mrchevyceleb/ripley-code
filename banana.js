@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 
 /**
- * Ripley Code v4.0.0 - Your local AI coding agent
+ * Banana Code v1.2.0 - AI coding agent CLI
  *
- * Local + remote providers with direct model connections.
+ * Monkey Models + remote providers with direct model connections.
  *
  * Features:
- * - Named model profiles with /model switching
+ * - Named model tiers with /model switching (Silverback, Mandrill, Gibbon, Tamarin)
  * - Streaming responses with markdown rendering
  * - File read/write with diffs and backups
  * - Agentic mode (AI reads files on demand)
- * - Local vision model support with Gemini fallback
+ * - Vision support via Monkey Models proxy
  * - @ mentions for quick file loading
  * - Command history, tab completion, watch mode
  * - Conversation save/load, token tracking
@@ -25,7 +25,7 @@ const os = require('os');
 const FileManager = require('./lib/fileManager');
 const ContextBuilder = require('./lib/contextBuilder');
 const CommandRunner = require('./lib/commandRunner');
-const { Config, GlobalConfig, GLOBAL_RIPLEY_DIR } = require('./lib/config');
+const { Config, GlobalConfig, GLOBAL_BANANA_DIR } = require('./lib/config');
 const HistoryManager = require('./lib/historyManager');
 const Completer = require('./lib/completer');
 const TokenCounter = require('./lib/tokenCounter');
@@ -80,7 +80,7 @@ let pendingHumanQuestion = null; // { resolve, question }
 // CONFIGURATION
 // =============================================================================
 
-const VERSION = '4.0.0';
+const VERSION = '1.2.0';
 const PAD = '  '; // Global left padding for all output
 const DEBUG_DISABLED_VALUES = new Set(['0', 'false', 'off', 'no']);
 const NEXT_TURN_RESERVE_TOKENS = 1200;
@@ -185,7 +185,7 @@ function buildPromptPrefix() {
   let pctColor = c.green;
   if (pct >= 80) pctColor = c.red;
   else if (pct >= 50) pctColor = c.yellow;
-  return `${borderRenderer.prefix('user')}${c.green}${modeIcon}${c.reset} ${c.dim}[${modelName}]${c.reset}${think} ${c.dim}ctx:${c.reset}${pctColor}${pct}%${c.reset} ${c.orange}You \u2192 ${c.reset}`;
+  return `${borderRenderer.prefix('user')}${c.green}${modeIcon}${c.reset} ${c.dim}[${modelName}]${c.reset}${think} ${c.dim}ctx:${c.reset}${pctColor}${pct}%${c.reset} ${c.banana}You \u2192 ${c.reset}`;
 }
 
 // Truncate an ANSI-decorated string to fit within the terminal width.
@@ -213,19 +213,19 @@ function fitToTerminal(str) {
 }
 
 function isDebugLoggingEnabled() {
-  const raw = (process.env.RIPLEY_DEBUG || '').trim().toLowerCase();
+  const raw = (process.env.BANANA_DEBUG || process.env.RIPLEY_DEBUG || '').trim().toLowerCase();
   if (!raw) return true; // default ON for active development
   return !DEBUG_DISABLED_VALUES.has(raw);
 }
 
 function defaultDebugLogPath() {
   const day = new Date().toISOString().slice(0, 10);
-  return path.join(os.homedir(), '.ripley', 'logs', `ripley-${day}.log`);
+  return path.join(os.homedir(), '.banana', 'logs', `banana-${day}.log`);
 }
 
 function appendDebugLog(line) {
   if (!isDebugLoggingEnabled()) return;
-  const target = process.env.RIPLEY_DEBUG_PATH || runtimeLogPath || defaultDebugLogPath();
+  const target = process.env.BANANA_DEBUG_PATH || process.env.RIPLEY_DEBUG_PATH || runtimeLogPath || defaultDebugLogPath();
   try {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.appendFileSync(target, line, 'utf-8');
@@ -236,12 +236,12 @@ function appendDebugLog(line) {
 
 function initDebugLogging() {
   const enabled = isDebugLoggingEnabled();
-  process.env.RIPLEY_DEBUG = enabled ? '1' : '0';
+  process.env.BANANA_DEBUG = enabled ? '1' : '0';
   if (!enabled) return null;
 
-  const configured = (process.env.RIPLEY_DEBUG_PATH || '').trim();
+  const configured = (process.env.BANANA_DEBUG_PATH || '').trim();
   const target = configured || defaultDebugLogPath();
-  process.env.RIPLEY_DEBUG_PATH = target;
+  process.env.BANANA_DEBUG_PATH = target;
   runtimeLogPath = target;
 
   appendDebugLog(
@@ -261,24 +261,24 @@ function logSessionEnd(reason, detail = '') {
 // =============================================================================
 
 const BANNER_ART_LINES = [
-  '██████╗ ██╗██████╗ ██╗     ███████╗██╗   ██╗',
-  '██╔══██╗██║██╔══██╗██║     ██╔════╝╚██╗ ██╔╝',
-  '██████╔╝██║██████╔╝██║     █████╗   ╚████╔╝',
-  '██╔══██╗██║██╔═══╝ ██║     ██╔══╝    ╚██╔╝',
-  '██║  ██║██║██║     ███████╗███████╗   ██║',
-  '╚═╝  ╚═╝╚═╝╚═╝     ╚══════╝╚══════╝   ╚═╝'
+  '\uD83C\uDF4C ██████╗  █████╗ ███╗   ██╗ █████╗ ███╗   ██╗ █████╗ ',
+  '  ██╔══██╗██╔══██╗████╗  ██║██╔══██╗████╗  ██║██╔══██╗',
+  '  ██████╔╝███████║██╔██╗ ██║███████║██╔██╗ ██║███████║',
+  '  ██╔══██╗██╔══██║██║╚██╗██║██╔══██║██║╚██╗██║██╔══██║',
+  '  ██████╔╝██║  ██║██║ ╚████║██║  ██║██║ ╚████║██║  ██║',
+  '  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝',
 ];
-const BANNER_WIDTH = 43;
-const ANIM_DISABLED_VALUES = new Set(['1', 'true', 'yes', 'on']);
+const BANNER_WIDTH = 55;
 const BANNER_ANIMATION_TOTAL_MS = 2500;
 const BANNER_PULSE_STEPS = 2;
+const ANIM_DISABLED_VALUES = new Set(['1', 'true', 'yes', 'on']);
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function shouldAnimateBanner() {
-  const disabled = (process.env.RIPLEY_NO_ANIM || '').trim().toLowerCase();
+  const disabled = (process.env.BANANA_NO_ANIM || process.env.RIPLEY_NO_ANIM || '').trim().toLowerCase();
   if (ANIM_DISABLED_VALUES.has(disabled)) return false;
   return Boolean(process.stdout.isTTY) && !Boolean(process.env.CI);
 }
@@ -286,9 +286,9 @@ function shouldAnimateBanner() {
 function renderBannerFrame(activeLine = null, forceColor = null) {
   const logo = BANNER_ART_LINES
     .map((line, i) => {
-      let color = forceColor || c.orange;
+      let color = forceColor || c.banana;
       if (!forceColor && activeLine !== null) {
-        if (i === activeLine) color = c.yellow;
+        if (i === activeLine) color = c.bananaGlow;
         else if (i > activeLine) color = c.gray;
       }
       return `${color}${PAD}${line}${c.reset}`;
@@ -296,7 +296,7 @@ function renderBannerFrame(activeLine = null, forceColor = null) {
     .join('\n');
 
   const separator = `${PAD}${c.cyan}${'═'.repeat(BANNER_WIDTH)}${c.reset}`;
-  const subtitle = `${PAD}${c.dim}Ripley Code • v${VERSION} • Local + Remote Models${c.reset}`;
+  const subtitle = `${PAD}${c.dim}Banana Code • v${VERSION} • Monkey Models + Remote Providers${c.reset}`;
   return `\n${logo}\n${separator}\n${subtitle}\n${separator}\n`;
 }
 
@@ -321,7 +321,7 @@ async function showBanner() {
     }
 
     for (let i = 0; i < BANNER_PULSE_STEPS; i++) {
-      const pulseColor = i % 2 === 0 ? c.yellow : c.orange;
+      const pulseColor = i % 2 === 0 ? c.bananaGlow : c.banana;
       console.clear();
       console.log(renderBannerFrame(null, pulseColor));
       await sleep(stepDelay);
@@ -337,7 +337,7 @@ async function showBanner() {
 function showHelp() {
   const P = PAD;
   console.log(`
-${P}${c.orange}${c.dim}File Commands:${c.reset}
+${P}${c.banana}${c.dim}File Commands:${c.reset}
 ${P}${c.yellow}/files${c.reset}              List files in context
 ${P}${c.yellow}/read <path>${c.reset}        Add file to context (or use @filename)
 ${P}${c.yellow}/unread <path>${c.reset}      Remove file from context
@@ -346,12 +346,12 @@ ${P}${c.yellow}/find <pattern>${c.reset}     Find files matching pattern
 ${P}${c.yellow}/grep <text>${c.reset}        Search for text in files
 ${P}${c.yellow}/image <path>${c.reset}       Add image (vision model or Gemini fallback)
 
-${P}${c.orange}${c.dim}Git Commands:${c.reset}
+${P}${c.banana}${c.dim}Git Commands:${c.reset}
 ${P}${c.yellow}/git${c.reset}                Show git status
 ${P}${c.yellow}/diff${c.reset}               Show uncommitted changes
 ${P}${c.yellow}/log${c.reset}                Show recent commits
 
-${P}${c.orange}${c.dim}Session Commands:${c.reset}
+${P}${c.banana}${c.dim}Session Commands:${c.reset}
 ${P}${c.yellow}/clear${c.reset}              Clear conversation & context
 ${P}${c.yellow}/clearhistory${c.reset}       Clear conversation only
 ${P}${c.yellow}/save <name>${c.reset}        Save conversation
@@ -362,10 +362,10 @@ ${P}${c.yellow}/tokens${c.reset}             Show token usage this session
 ${P}${c.yellow}/compact${c.reset}            Toggle compact mode
 ${P}${c.yellow}/think [level]${c.reset}       Set thinking level: off, low, medium, high (cycles if no arg)
 
-${P}${c.orange}${c.dim}Modes:${c.reset}
+${P}${c.banana}${c.dim}Modes:${c.reset}
 ${P}${c.yellow}/work${c.reset}               Switch to WORK mode (execute operations)
 ${P}${c.yellow}/plan${c.reset}               Toggle PLAN mode (explore + structured plan + review)
-${P}${c.yellow}/implement${c.reset}          Execute the saved plan from .ripley/plan.md
+${P}${c.yellow}/implement${c.reset}          Execute the saved plan from .banana/plan.md
 ${P}${c.yellow}/ask${c.reset}                Toggle ASK mode (questions only, no file ops)
 ${P}${c.yellow}/mode${c.reset}               Show current mode
 ${P}${c.yellow}/yolo${c.reset}               Toggle YOLO mode (auto-apply all changes)
@@ -377,7 +377,7 @@ ${P}${c.yellow}/model search <query>${c.reset} Search OpenRouter models and add 
 ${P}${c.yellow}/connect [provider]${c.reset} Connect provider (Anthropic, OpenAI OAuth, OpenRouter)
 ${P}${c.yellow}/prompt [name]${c.reset}     Show/switch prompt (base, code-agent, or any .md)
 
-${P}${c.orange}${c.dim}Config Commands:${c.reset}
+${P}${c.banana}${c.dim}Config Commands:${c.reset}
 ${P}${c.yellow}/config${c.reset}             Show current config
 ${P}${c.yellow}/set <key> <value>${c.reset}  Update config setting
 ${P}${c.yellow}/instructions${c.reset}       Edit project instructions
@@ -385,23 +385,23 @@ ${P}${c.yellow}/mcp${c.reset}                MCP server status, setup, auth, too
 ${P}${c.yellow}/watch${c.reset}              Toggle file watch mode
 ${P}${c.yellow}/stream${c.reset}             Toggle streaming mode
 
-${P}${c.orange}${c.dim}System Commands:${c.reset}
+${P}${c.banana}${c.dim}System Commands:${c.reset}
 ${P}${c.yellow}/run <cmd>${c.reset}          Run a shell command
 ${P}${c.yellow}/undo${c.reset}               Show recent backups
 ${P}${c.yellow}/restore <path>${c.reset}     Restore file from backup
-${P}${c.yellow}/commands${c.reset}           List custom commands (~/.ripley/commands/)
+${P}${c.yellow}/commands${c.reset}           List custom commands (~/.banana/commands/)
 ${P}${c.yellow}/version${c.reset}            Show version
 ${P}${c.yellow}/help${c.reset}               Show this help
-${P}${c.yellow}/exit${c.reset}               Exit Ripley
+${P}${c.yellow}/exit${c.reset}               Exit Banana
 
-${P}${c.orange}${c.dim}Tips:${c.reset}
+${P}${c.banana}${c.dim}Tips:${c.reset}
 ${P}${c.gray}• Use ${c.cyan}@filename${c.gray} in messages to auto-load files
 ${P}${c.gray}• Press ${c.cyan}↑${c.gray}/${c.cyan}↓${c.gray} to navigate command history
 ${P}${c.gray}• Press ${c.cyan}Tab${c.gray} for completion
 ${P}${c.gray}• Press ${c.cyan}Shift+Tab${c.gray} to cycle modes (work → plan → ask)
 ${P}${c.gray}• Press ${c.cyan}Alt+V${c.gray} to paste screenshot from clipboard
 ${P}${c.gray}• Press ${c.cyan}Esc Esc${c.gray} to cancel current request
-${P}${c.gray}• Create ${c.cyan}RIPLEY.md${c.gray} in your project root for project-specific AI instructions
+${P}${c.gray}• Create ${c.cyan}BANANA.md${c.gray} in your project root for project-specific AI instructions
 ${c.reset}`);
 }
 
@@ -412,12 +412,12 @@ ${c.reset}`);
 function initProject() {
   // Initialize all components
   globalConfig = new GlobalConfig();
-  globalConfig.ensureDir(); // Ensure ~/.ripley/ structure exists on every run
+  globalConfig.ensureDir(); // Ensure ~/.banana/ structure exists on every run
   config = new Config(projectDir);
   fileManager = new FileManager(projectDir);
   contextBuilder = new ContextBuilder(fileManager, config.get('ignorePatterns'));
   commandRunner = new CommandRunner(projectDir);
-  historyManager = new HistoryManager(path.join(projectDir, '.ripley'));
+  historyManager = new HistoryManager(path.join(projectDir, '.banana'));
   completer = new Completer(projectDir, contextBuilder);
   inlineComplete = new InlineComplete();
   inlineComplete.projectDir = projectDir;
@@ -472,6 +472,7 @@ function initProject() {
   }
   geminiKey = geminiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   visionAnalyzer = new VisionAnalyzer({ apiKey: geminiKey });
+  visionAnalyzer.setActiveProvider(modelRegistry.getCurrentProvider());
 
   // Initialize watcher (but don't start yet)
   watcher = new Watcher(projectDir, contextBuilder, {
@@ -493,13 +494,13 @@ function initProject() {
   contextBuilder.loadPriorityFiles();
   console.log(`${PAD}${c.green}✓${c.reset} Context: ${contextBuilder.getLoadedFiles().length} files loaded`);
 
-  // Check for global instructions (~/.ripley/RIPLEY.md)
+  // Check for global instructions (~/.banana/BANANA.md)
   const globalInst = globalConfig.getInstructions();
   if (globalInst) {
     console.log(`${PAD}${c.green}✓${c.reset} Global instructions loaded ${c.dim}(${globalInst.source})${c.reset}`);
   }
 
-  // Check for project instructions (RIPLEY.md or .ripley/instructions.md)
+  // Check for project instructions (BANANA.md or .banana/instructions.md)
   const instructions = config.getInstructions();
   if (instructions) {
     console.log(`${PAD}${c.green}✓${c.reset} Project instructions loaded ${c.dim}(${instructions.source})${c.reset}`);
@@ -817,19 +818,20 @@ async function searchInFiles(searchText) {
 }
 
 // =============================================================================
-// CUSTOM COMMANDS (~/.ripley/commands/ and .ripley/commands/)
+// CUSTOM COMMANDS (~/.banana/commands/ and .banana/commands/)
 // =============================================================================
 
-const GLOBAL_COMMANDS_DIR = path.join(require('os').homedir(), '.ripley', 'commands');
+const GLOBAL_COMMANDS_DIR = path.join(require('os').homedir(), '.banana', 'commands');
+const LEGACY_COMMANDS_DIR = path.join(require('os').homedir(), '.ripley', 'commands');
 
 /**
- * Load a custom command. Project-local (.ripley/commands/) takes precedence over global (~/.ripley/commands/).
+ * Load a custom command. Project-local (.banana/commands/) takes precedence over global (~/.banana/commands/).
  * Returns { name, content, source } or null if not found.
  */
 function loadCustomCommand(cmd) {
   const name = cmd.replace(/^\//, '');
   // Check project-local first
-  const localDir = path.join(projectDir, '.ripley', 'commands');
+  const localDir = path.join(projectDir, '.banana', 'commands');
   const localPath = path.join(localDir, `${name}.md`);
   if (fs.existsSync(localPath)) {
     try {
@@ -843,6 +845,13 @@ function loadCustomCommand(cmd) {
       return { name, content: fs.readFileSync(globalPath, 'utf-8').trim(), source: globalPath };
     } catch {}
   }
+  // Legacy fallback (~/.ripley/commands/)
+  const legacyPath = path.join(LEGACY_COMMANDS_DIR, `${name}.md`);
+  if (fs.existsSync(legacyPath)) {
+    try {
+      return { name, content: fs.readFileSync(legacyPath, 'utf-8').trim(), source: legacyPath };
+    } catch {}
+  }
   return null;
 }
 
@@ -850,7 +859,7 @@ function loadCustomCommand(cmd) {
  * List all available custom commands from both global and local directories.
  */
 function listCustomCommands() {
-  const localDir = path.join(projectDir, '.ripley', 'commands');
+  const localDir = path.join(projectDir, '.banana', 'commands');
   const dirs = [
     { dir: GLOBAL_COMMANDS_DIR, label: 'Global', scope: 'global' },
     { dir: localDir, label: 'Project', scope: 'local' }
@@ -877,7 +886,7 @@ function listCustomCommands() {
 
   if (!anyFound) {
     console.log(`\n${PAD}${c.dim}No custom commands found.${c.reset}`);
-    console.log(`${PAD}${c.dim}Add .md files to ~/.ripley/commands/ (global) or .ripley/commands/ (project).${c.reset}\n`);
+    console.log(`${PAD}${c.dim}Add .md files to ~/.banana/commands/ (global) or .banana/commands/ (project).${c.reset}\n`);
   }
 }
 
@@ -1182,6 +1191,7 @@ async function switchModel(modelKey, options = {}) {
   lastKnownTokens = 0;
   projectedContextTokens = 0;
   const switched = modelRegistry.getCurrentModel();
+  if (visionAnalyzer) visionAnalyzer.setActiveProvider(switched?.provider || 'local');
   const parts = modelDisplayParts(switched);
 
   if (!silent) {
@@ -1342,12 +1352,12 @@ async function handleCommand(input) {
       console.log(`\n${PAD}${c.cyan}Checking for updates...${c.reset}`);
       const { execSync } = require('child_process');
       try {
-        const result = execSync('npm install -g mrchevyceleb/ripley-code', {
+        const result = execSync('npm install -g mrchevyceleb/banana-code', {
           encoding: 'utf-8',
           timeout: 60000,
           stdio: ['pipe', 'pipe', 'pipe']
         });
-        console.log(`${PAD}${c.green}✓ Updated! Restart Ripley to use the new version.${c.reset}\n`);
+        console.log(`${PAD}${c.green}✓ Updated! Restart Banana to use the new version.${c.reset}\n`);
       } catch (err) {
         console.log(`${PAD}${c.red}✗ Update failed: ${err.message}${c.reset}\n`);
       }
@@ -1356,7 +1366,7 @@ async function handleCommand(input) {
 
     case '/version':
     case '/v':
-      console.log(`\n${PAD}${c.cyan}Ripley Code v${VERSION}${c.reset}\n`);
+      console.log(`\n${PAD}${c.cyan}Banana Code v${VERSION}${c.reset}\n`);
       return true;
 
     case '/files':
@@ -1835,7 +1845,7 @@ async function handleCommand(input) {
       const newYolo = !config.get('yoloMode');
       config.set('yoloMode', newYolo);
       if (newYolo) {
-        console.log(`\n${c.orange}  🔥 YOLO MODE: ON${c.reset}`);
+        console.log(`\n${c.banana}  🔥 YOLO MODE: ON${c.reset}`);
         console.log(`${PAD}${c.dim}  File changes and commands will be applied automatically without confirmation.${c.reset}`);
         console.log(`${PAD}${c.dim}  Dangerous commands still require typing 'yes'.${c.reset}\n`);
       } else {
@@ -1876,7 +1886,7 @@ async function handleCommand(input) {
       return true;
 
     case '/implement':
-      const planPath = path.join(projectDir, '.ripley', 'plan.md');
+      const planPath = path.join(projectDir, '.banana', 'plan.md');
       if (!fs.existsSync(planPath)) {
         console.log(`\n${PAD}${c.yellow}No plan found. Use /plan mode first to create one.${c.reset}\n`);
         return true;
@@ -2343,10 +2353,10 @@ async function handleCommand(input) {
               const scope = scopeInput.trim().toLowerCase();
               if (scope === 'global' || scope === 'g') {
                 globalConfig.set('mcpUrl', finalUrl);
-                console.log(`${PAD}${c.dim}  URL saved globally (~/.ripley/config.json)${c.reset}`);
+                console.log(`${PAD}${c.dim}  URL saved globally (~/.banana/config.json)${c.reset}`);
               } else {
                 config.set('mcpUrl', finalUrl);
-                console.log(`${PAD}${c.dim}  URL saved locally (.ripley/config.json)${c.reset}`);
+                console.log(`${PAD}${c.dim}  URL saved locally (.banana/config.json)${c.reset}`);
               }
 
               // Show tool count
@@ -2410,7 +2420,7 @@ async function handleCommand(input) {
         console.log(`${PAD}${c.dim}${gPreview}${existingGlobalInst.content.length > 300 ? '...' : ''}${c.reset}`);
         console.log(`${PAD}${c.dim}Edit: ${globalConfig.instructionsPath}${c.reset}`);
       } else {
-        console.log(`\n${PAD}${c.dim}No global instructions. Create ~/.ripley/RIPLEY.md to add them.${c.reset}`);
+        console.log(`\n${PAD}${c.dim}No global instructions. Create ~/.banana/BANANA.md to add them.${c.reset}`);
       }
       // Show project instructions
       const existingInstructions = config.getInstructions();
@@ -2418,14 +2428,14 @@ async function handleCommand(input) {
         console.log(`\n${PAD}${c.cyan}Project Instructions (${existingInstructions.source}):${c.reset}`);
         const preview = existingInstructions.content.substring(0, 500);
         console.log(`${PAD}${c.dim}${preview}${existingInstructions.content.length > 500 ? '...' : ''}${c.reset}`);
-        const editPath = existingInstructions.source === 'RIPLEY.md'
-          ? path.join(projectDir, 'RIPLEY.md')
-          : path.join(projectDir, '.ripley', 'instructions.md');
+        const editPath = existingInstructions.source === 'BANANA.md'
+          ? path.join(projectDir, 'BANANA.md')
+          : path.join(projectDir, '.banana', 'instructions.md');
         console.log(`\n${PAD}${c.dim}Edit: ${editPath}${c.reset}\n`);
       } else {
         config.createDefaultInstructions();
-        console.log(`\n${PAD}${c.green}  ✓ Created RIPLEY.md${c.reset}`);
-        console.log(`${PAD}${c.dim}Edit: ${path.join(projectDir, 'RIPLEY.md')}${c.reset}\n`);
+        console.log(`\n${PAD}${c.green}  ✓ Created BANANA.md${c.reset}`);
+        console.log(`${PAD}${c.dim}Edit: ${path.join(projectDir, 'BANANA.md')}${c.reset}\n`);
       }
       return true;
     }
@@ -2494,7 +2504,7 @@ async function handleCommand(input) {
       return true;
 
     default:
-      // Check for custom commands (project .ripley/commands/ first, then global ~/.ripley/commands/)
+      // Check for custom commands (project .banana/commands/ first, then global ~/.banana/commands/)
       const customResult = loadCustomCommand(cmd);
       if (customResult) {
         console.log(`\n${PAD}${c.cyan}Running custom command: ${customResult.name}${c.reset}`);
@@ -2626,7 +2636,7 @@ async function sendMessage(message) {
   let fullMessage = `## Project Overview\n\nWorking directory: ${projectDir}\n\nFiles available (use read_file to examine if needed):\n${fileList.slice(0, FILE_LIST_CAP).join('\n')}${fileList.length > FILE_LIST_CAP ? `\n... and ${fileList.length - FILE_LIST_CAP} more (use list_files to explore)` : ''}`;
   const hasVisionImages = pendingImages.length > 0 && modelRegistry.currentSupportsVision();
 
-  // NOTE: Project instructions (RIPLEY.md) are now injected in the system prompt,
+  // NOTE: Project instructions (BANANA.md) are now injected in the system prompt,
   // not here in the user message. This gives them higher priority with local models.
 
   if (imageAnalysis) {
@@ -2769,7 +2779,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     } else {
       process.stdout.write('\x1b[2K\x1b[0G');
     }
-    const aiLabel = `${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `;
+    const aiLabel = `${borderRenderer.prefix('ai')}${c.cyan}Banana →${c.reset} `;
     process.stdout.write(aiLabel);
     // Tell word wrapper how much of the first line is already used
     wordWrapper.currentLineLength = borderRenderer.stripAnsi(aiLabel).length;
@@ -3007,7 +3017,7 @@ async function handleHooksCommand(args) {
 
   // /hooks add - interactive wizard
   if (subCommand === 'add') {
-    console.log(`\n${PAD}${c.orange}Add Hook${c.reset}\n`);
+    console.log(`\n${PAD}${c.banana}Add Hook${c.reset}\n`);
     const result = await hookManager.runAddWizard(pick, askQuestion, modelRegistry);
     if (result) {
       const scopeLabel = result.scope === 'project' ? 'project' : 'global';
@@ -3053,7 +3063,7 @@ async function handleHooksCommand(args) {
   // /hooks edit [name]
   if (subCommand === 'edit') {
     const name = parts.slice(1).join(' ') || null;
-    console.log(`\n${PAD}${c.orange}Edit Hook${c.reset}\n`);
+    console.log(`\n${PAD}${c.banana}Edit Hook${c.reset}\n`);
     const result = await hookManager.runEditWizard(pick, askQuestion, modelRegistry, name);
     if (result) {
       console.log(`\n${PAD}${c.green}Hook "${result.hookName}" updated.${c.reset}\n`);
@@ -3110,7 +3120,7 @@ async function handleHooksCommand(args) {
 
   // Default: show help
   console.log(`
-${PAD}${c.orange}Hook System${c.reset}
+${PAD}${c.banana}Hook System${c.reset}
 ${PAD}${c.dim}Automated actions at lifecycle points.${c.reset}
 
 ${PAD}${c.yellow}/hooks${c.reset}                  List all hooks
@@ -3122,7 +3132,7 @@ ${PAD}${c.yellow}/hooks test <name>${c.reset}      Test-fire a hook
 
 ${PAD}${c.dim}Hook points: beforeTurn, afterTurn, afterWrite, afterCommand, onError${c.reset}
 ${PAD}${c.dim}Hook types: Prompt (AI-configured) | Agent A/B (manual) | Shell (command)${c.reset}
-${PAD}${c.dim}Scopes: Global (~/.ripley/hooks.json) or Project (.ripley/hooks.json)${c.reset}
+${PAD}${c.dim}Scopes: Global (~/.banana/hooks.json) or Project (.banana/hooks.json)${c.reset}
 `);
 }
 
@@ -3189,7 +3199,7 @@ async function handleAgentCommand(args) {
   // /agent help
   if (subCommand === 'help') {
     console.log(`
-${PAD}${c.orange}Sub-Agent System${c.reset}
+${PAD}${c.banana}Sub-Agent System${c.reset}
 ${PAD}${c.dim}Spawn sub-agents on any connected model/provider.${c.reset}
 
 ${PAD}${c.yellow}/agent${c.reset}                    Interactive model picker + task prompt
@@ -3212,7 +3222,7 @@ ${PAD}${c.dim}AI can also spawn agents via the spawn_agent tool during conversat
       console.log(`\n${PAD}${c.dim}No agents spawned this session.${c.reset}\n`);
       return;
     }
-    console.log(`\n${PAD}${c.orange}Session Agents (${agents.length})${c.reset}`);
+    console.log(`\n${PAD}${c.banana}Session Agents (${agents.length})${c.reset}`);
     for (const agent of agents) {
       const statusIcon = agent.status === 'completed' ? `${c.green}done${c.reset}`
         : agent.status === 'failed' ? `${c.red}fail${c.reset}`
@@ -3247,7 +3257,7 @@ ${PAD}${c.dim}AI can also spawn agents via the spawn_agent tool during conversat
       ? `${((agent.completedAt - agent.startedAt) / 1000).toFixed(1)}s`
       : `${((Date.now() - agent.startedAt) / 1000).toFixed(1)}s (running)`;
     console.log(`
-${PAD}${c.orange}Agent ${agent.id}${c.reset}
+${PAD}${c.banana}Agent ${agent.id}${c.reset}
 ${PAD}  Model:    ${c.white}${agent.model}${c.reset} (${agent.provider})
 ${PAD}  Status:   ${agent.status}
 ${PAD}  Task:     ${agent.task}
@@ -3278,7 +3288,7 @@ ${PAD}  Depth:    ${agent.depth}
   // /agent models
   if (subCommand === 'models') {
     const models = modelRegistry.list();
-    console.log(`\n${PAD}${c.orange}Available Models for Sub-Agents${c.reset}`);
+    console.log(`\n${PAD}${c.banana}Available Models for Sub-Agents${c.reset}`);
     const grouped = {};
     for (const m of models) {
       const provider = m.provider || 'local';
@@ -3679,7 +3689,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
             console.log(`${borderRenderer.prefix('tool')}${c.dim}── ${toolCallsDisplayed.length} ${stepWord} completed ──${c.reset}`);
           }
 
-          const agenticAiLabel = `${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `;
+          const agenticAiLabel = `${borderRenderer.prefix('ai')}${c.cyan}Banana →${c.reset} `;
           process.stdout.write(agenticAiLabel);
           wordWrapper.currentLineLength = borderRenderer.stripAnsi(agenticAiLabel).length;
         }
@@ -4043,7 +4053,7 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
   let spinTick = 0;
   if (statusBar) statusBar.startTiming();
   const spinner = setInterval(() => {
-    process.stdout.write(`\r${borderRenderer.prefix('thinking')}${modeColors[interactionMode]}${frames[i]} ${c.dim}Ripley is thinking...${c.reset}`);
+    process.stdout.write(`\r${borderRenderer.prefix('thinking')}${modeColors[interactionMode]}${frames[i]} ${c.dim}Banana is thinking...${c.reset}`);
     i = (i + 1) % frames.length;
     spinTick++;
     if (statusBar && spinTick % 10 === 0) {
@@ -4107,7 +4117,7 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
 
     if (statusBar) statusBar.stopTiming();
     const { renderMarkdown } = require('./lib/markdownRenderer');
-    console.log(`\n${borderRenderer.prefix('ai')}${c.cyan}Ripley →${c.reset} `);
+    console.log(`\n${borderRenderer.prefix('ai')}${c.cyan}Banana →${c.reset} `);
     console.log(renderMarkdown(reply));
     console.log();
 
@@ -4140,13 +4150,13 @@ async function processAIResponse(reply, originalMessage, options = {}) {
   // In plan mode: save plan, then interactive review flow
   if (interactionMode === 'plan') {
     // Save plan to file for reference
-    const planPath = path.join(projectDir, '.ripley', 'plan.md');
-    const ripleyDir = path.join(projectDir, '.ripley');
-    if (!fs.existsSync(ripleyDir)) {
-      fs.mkdirSync(ripleyDir, { recursive: true });
+    const planPath = path.join(projectDir, '.banana', 'plan.md');
+    const bananaDir = path.join(projectDir, '.banana');
+    if (!fs.existsSync(bananaDir)) {
+      fs.mkdirSync(bananaDir, { recursive: true });
     }
     fs.writeFileSync(planPath, reply);
-    console.log(`\n${PAD}${c.green}  ✓ Plan saved to .ripley/plan.md${c.reset}`);
+    console.log(`\n${PAD}${c.green}  ✓ Plan saved to .banana/plan.md${c.reset}`);
 
     // Update conversation history
     conversationHistory.push({ role: 'user', content: originalMessage });
@@ -4261,7 +4271,7 @@ async function handleFileOperations(operations) {
   let response;
 
   if (yoloMode) {
-    console.log(`${c.orange}  🔥 YOLO: Auto-applying changes...${c.reset}\n`);
+    console.log(`${c.banana}  🔥 YOLO: Auto-applying changes...${c.reset}\n`);
     response = 'y';
   } else {
     // Ask for confirmation
@@ -4373,7 +4383,7 @@ async function handleCommands(commands) {
   // Pre-process commands to handle directory changes
   const processedCommands = preprocessCommands(commands);
 
-  console.log(`${c.orange}🔧 Suggested Commands:${c.reset}\n`);
+  console.log(`${c.banana}🔧 Suggested Commands:${c.reset}\n`);
 
   for (const cmd of processedCommands) {
     console.log(`${PAD}${c.dim}$ ${cmd}${c.reset}`);
@@ -4385,7 +4395,7 @@ async function handleCommands(commands) {
   let shouldRun;
 
   if (yoloMode) {
-    console.log(`${c.orange}  🔥 YOLO: Auto-running commands...${c.reset}\n`);
+    console.log(`${c.banana}  🔥 YOLO: Auto-running commands...${c.reset}\n`);
     shouldRun = true;
   } else {
     const answer = await askQuestion(`${c.yellow}Run these commands? (y/n): ${c.reset}`);
@@ -4788,13 +4798,13 @@ async function main() {
 
   if (args.includes('--help') || args.includes('-h')) {
     console.log(`
-Ripley Code v${VERSION} - AI Coding Agent
+Banana Code v${VERSION} - AI Coding Agent
 
 Usage:
-  ripley              Start interactive mode
-  ripley yolo         Start in YOLO mode (auto-apply all changes)
-  ripley init         Initialize .ripley config
-  ripley <request>    One-shot mode
+  banana              Start interactive mode
+  banana yolo         Start in YOLO mode (auto-apply all changes)
+  banana init         Initialize .banana config
+  banana <request>    One-shot mode
 
 Options:
   --help, -h          Show this help
@@ -4803,35 +4813,35 @@ Options:
   --no-status-bar     Disable the pinned status bar (fallback UI mode)
 
 Examples:
-  ripley
-  ripley yolo
-  ripley "Add a dark mode toggle"
-  ripley "Fix the bug in @src/api/auth.ts"
+  banana
+  banana yolo
+  banana "Add a dark mode toggle"
+  banana "Fix the bug in @src/api/auth.ts"
 `);
     logSessionEnd('exit', ' code=0 phase=help');
     process.exit(0);
   }
 
   if (args.includes('--version') || args.includes('-v')) {
-    console.log(`Ripley Code v${VERSION}`);
+    console.log(`Banana Code v${VERSION}`);
     logSessionEnd('exit', ' code=0 phase=version');
     process.exit(0);
   }
 
   if (args[0] === 'init') {
-    const ripleyDir = path.join(projectDir, '.ripley');
-    if (!fs.existsSync(ripleyDir)) {
-      fs.mkdirSync(ripleyDir, { recursive: true });
+    const bananaDir = path.join(projectDir, '.banana');
+    if (!fs.existsSync(bananaDir)) {
+      fs.mkdirSync(bananaDir, { recursive: true });
       fs.writeFileSync(
-        path.join(ripleyDir, 'config.json'),
+        path.join(bananaDir, 'config.json'),
         JSON.stringify({ version: VERSION, created: new Date().toISOString() }, null, 2)
       );
       const cfg = new Config(projectDir);
       cfg.createDefaultInstructions();
-      console.log(`${PAD}${c.green}✓ Initialized Ripley in ${projectDir}${c.reset}`);
-      console.log(`${PAD}${c.dim}Edit RIPLEY.md to customize AI behavior${c.reset}`);
+      console.log(`${PAD}${c.green}✓ Initialized Banana Code in ${projectDir}${c.reset}`);
+      console.log(`${PAD}${c.dim}Edit BANANA.md to customize AI behavior${c.reset}`);
     } else {
-      console.log(`${PAD}${c.yellow}Ripley already initialized${c.reset}`);
+      console.log(`${PAD}${c.yellow}Banana already initialized${c.reset}`);
     }
     logSessionEnd('exit', ' code=0 phase=init');
     process.exit(0);
@@ -4942,7 +4952,7 @@ Examples:
     let pctColor = c.green;
     if (pct >= 80) pctColor = c.red;
     else if (pct >= 50) pctColor = c.yellow;
-    return `${borderRenderer.prefix('user')}${c.green}${modeIcon}${c.reset} ${c.dim}[${modelName}]${c.reset}${think ? ` ${c.cyan}🧠${c.reset}` : ''} ${c.dim}ctx:${c.reset}${pctColor}${pct}%${c.reset} ${c.orange}You → ${c.reset}`;
+    return `${borderRenderer.prefix('user')}${c.green}${modeIcon}${c.reset} ${c.dim}[${modelName}]${c.reset}${think ? ` ${c.cyan}🧠${c.reset}` : ''} ${c.dim}ctx:${c.reset}${pctColor}${pct}%${c.reset} ${c.banana}You → ${c.reset}`;
   };
 
   // Expose prompt restoration for mid-turn steering cleanup
@@ -4951,11 +4961,11 @@ Examples:
   };
 
   // Build a highlighted version of the user prompt for post-submission repaint.
-  // Light orange bg, dark text, no ANSI reset conflicts.
+  // Banana yellow bg, dark text.
   const getHighlightedPrompt = (userText) => {
-    const BG = '\x1b[48;2;200;120;40m';
-    const FG = '\x1b[38;2;25;12;0m';
-    const ACCENT = `\x1b[38;2;100;55;15m`;  // Dimmer accent for metadata
+    const BG = '\x1b[48;2;255;214;10m';
+    const FG = '\x1b[38;2;30;20;0m';
+    const ACCENT = `\x1b[38;2;120;100;5m`;  // Dimmer accent for metadata
     const { modelName, pct, modeIcon, think } = getPromptData();
     const cols = process.stdout.columns || 120;
     const bgRow = `${BG}${' '.repeat(cols)}\x1b[0m`;
@@ -5034,7 +5044,7 @@ Examples:
   // When pasting multi-line text, readline fires the callback for the first line,
   // then subsequent lines arrive as new 'line' events. We detect paste by
   // buffering lines that arrive within PASTE_DELAY_MS of each other.
-  const PASTE_DELAY_MS = 200; // 200ms to handle Windows Terminal paste confirmation dialog latency
+  const PASTE_DELAY_MS = 400; // 400ms to handle large pastes and Windows Terminal dialog latency
   let pasteBuffer = [];
   let pasteTimer = null;
   let waitingForInput = false;
@@ -5203,9 +5213,9 @@ Examples:
         return;
       }
 
-      // Straggler paste lines: arrived after flush but within 500ms and before AI started.
+      // Straggler paste lines: arrived after flush but within 2s and before AI started.
       // This happens on Windows when the paste confirmation dialog adds latency between lines.
-      if (!currentAbortController && lastFlushTime && (Date.now() - lastFlushTime) < 500) {
+      if (!currentAbortController && lastFlushTime && (Date.now() - lastFlushTime) < 2000) {
         const trimmed = String(input || '').trim();
         if (trimmed) {
           appendDebugLog(`[paste-straggler] Dropped line arrived ${Date.now() - lastFlushTime}ms after flush: ${trimmed.slice(0, 60)}\n`);
@@ -5217,6 +5227,13 @@ Examples:
       // Mid-turn steering: user typed while agent was working
       if (currentAbortController) {
         const trimmed = String(input || '').trim();
+
+        // Straggler paste lines during turn: arrived shortly after flush.
+        // These are leftover paste lines, not intentional steering.
+        if (trimmed && lastFlushTime && (Date.now() - lastFlushTime) < 2000) {
+          appendDebugLog(`[paste-straggler-midturn] Dropped: ${trimmed.slice(0, 60)}\n`);
+          return;
+        }
 
         if (!trimmed) {
           // Empty Enter: restore spinner+prompt layout.

@@ -30,7 +30,7 @@ All commands start with `/`. Type `/help` to see the full list.
 ## Modes
 - `/work` - Default mode. AI reads, writes, and runs commands.
 - `/plan` - AI explores and creates a structured plan but makes no changes.
-- `/implement` - Execute a saved plan from `.ripley/plan.md`
+- `/implement` - Execute a saved plan from `.banana/plan.md`
 - `/ask` - AI answers questions but performs no file operations.
 - `/mode` - Show which mode is active
 - `/yolo` - Toggle auto-apply (skip confirmation for file changes)
@@ -49,7 +49,7 @@ All commands start with `/`. Type `/help` to see the full list.
 ## Config Commands
 - `/config` - Show current configuration
 - `/set <key> <value>` - Update a config value
-- `/instructions` - View or create project instructions (RIPLEY.md)
+- `/instructions` - View or create project instructions (BANANA.md)
 - `/mcp` - MCP server status, setup, auth, tools
 - `/watch` - Toggle file watch mode
 - `/stream` - Toggle streaming mode
@@ -58,9 +58,9 @@ All commands start with `/`. Type `/help` to see the full list.
 - `/run <cmd>` - Run a shell command
 - `/undo` - Show recent file backups
 - `/restore <path>` - Restore a file from backup
-- `/commands` - List custom commands from `~/.ripley/Commands/`
+- `/commands` - List custom commands from `~/.banana/Commands/`
 - `/version` - Show version
-- `/exit` - Exit Ripley
+- `/exit` - Exit Banana
 
 ## Keyboard Shortcuts
 - `Tab` - Autocomplete commands and file paths

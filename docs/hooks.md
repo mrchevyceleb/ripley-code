@@ -1,6 +1,6 @@
 # Hooks
 
-Hooks are automated actions that fire at lifecycle points during a Ripley session. They can run AI agents or shell commands.
+Hooks are automated actions that fire at lifecycle points during a Banana session. They can run AI agents or shell commands.
 
 ## Hook Points
 
@@ -41,8 +41,8 @@ Hook output can be injected into the conversation:
 
 ## Scope
 
-- **Global**: `~/.ripley/hooks.json` - applies to all projects
-- **Project**: `.ripley/hooks.json` - project-specific, overrides global hooks with the same name
+- **Global**: `~/.banana/hooks.json` - applies to all projects
+- **Project**: `.banana/hooks.json` - project-specific, overrides global hooks with the same name
 
 ## Commands
 

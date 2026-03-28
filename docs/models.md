@@ -1,6 +1,6 @@
 # Models
 
-Ripley connects to LM Studio (localhost:1234) and supports named model profiles defined in `models.json`.
+Banana connects to LM Studio (localhost:1234) and supports named model profiles defined in `models.json`.
 
 ## Commands
 
@@ -37,7 +37,7 @@ Users can also connect cloud models via OpenRouter:
 
 ## Provider System
 
-Ripley supports multiple providers:
+Banana supports multiple providers:
 - **Local (LM Studio)** - Default. Models loaded on the user's GPU.
 - **OpenRouter** - Cloud models. Requires API key via `/connect openrouter`.
 - **Anthropic** - Direct Claude access. `/connect anthropic`.
@@ -47,4 +47,4 @@ Use `/connect` to set up providers.
 
 ## Model Selection Persistence
 
-The active model is saved in `.ripley/config.json` and persists across sessions. Each model can specify its own system prompt, so switching models can also change the AI's behavior profile.
+The active model is saved in `.banana/config.json` and persists across sessions. Each model can specify its own system prompt, so switching models can also change the AI's behavior profile.

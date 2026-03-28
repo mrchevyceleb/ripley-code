@@ -1,19 +1,19 @@
-# Project Instructions (RIPLEY.md)
+# Project Instructions (BANANA.md)
 
-Project instructions let users customize Ripley's behavior per project. Like `CLAUDE.md` for Claude Code.
+Project instructions let users customize Banana's behavior per project. Like `CLAUDE.md` for Claude Code.
 
 ## How It Works
 
-1. Create a file called `RIPLEY.md` at the project root
-2. Ripley automatically loads it into the system prompt on every message
+1. Create a file called `BANANA.md` at the project root
+2. Banana automatically loads it into the system prompt on every message
 3. The AI sees these instructions as part of its context
 
 ## File Locations
 
-- **Primary**: `RIPLEY.md` at project root (recommended)
-- **Legacy fallback**: `.ripley/instructions.md`
+- **Primary**: `BANANA.md` at project root (recommended)
+- **Legacy fallback**: `.banana/instructions.md`
 
-## What to Put in RIPLEY.md
+## What to Put in BANANA.md
 
 - Project stack and conventions (e.g., "This is a Next.js 14 app using TypeScript")
 - Coding style preferences (e.g., "Use functional components, no classes")
@@ -24,9 +24,9 @@ Project instructions let users customize Ripley's behavior per project. Like `CL
 
 ## Commands
 
-- `/instructions` - Opens RIPLEY.md in the default editor, or creates a template if it doesn't exist
+- `/instructions` - Opens BANANA.md in the default editor, or creates a template if it doesn't exist
 
-## Example RIPLEY.md
+## Example BANANA.md
 
 ```markdown
 # Project: My SaaS App
