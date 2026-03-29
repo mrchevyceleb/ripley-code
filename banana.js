@@ -81,7 +81,7 @@ let pendingHumanQuestion = null; // { resolve, question }
 // =============================================================================
 
 const VERSION = '1.2.0';
-const PAD = '  '; // Global left padding for all output
+const { PAD } = require('./lib/borderRenderer'); // Single source of truth for left padding
 const DEBUG_DISABLED_VALUES = new Set(['0', 'false', 'off', 'no']);
 const NEXT_TURN_RESERVE_TOKENS = 1200;
 const COMPACTION_SAFETY_BUFFER = 0.05;
@@ -1592,6 +1592,14 @@ async function handleCommand(input) {
         statusBar.reinstall();
       }
       console.clear();
+      // Push cursor to bottom of scroll region so prompt isn't stranded at the top
+      {
+        const totalRows = process.stdout.rows || 24;
+        const scrollEnd = Math.max(1, totalRows - (4 + 1)); // BAR_HEIGHT + GAP_ROWS
+        // Write enough newlines to push cursor to near the bottom of the scroll region
+        const padding = Math.max(0, scrollEnd - 3);
+        if (padding > 0) process.stdout.write('\n'.repeat(padding));
+      }
       refreshIdleContextEstimate();
       if (rl) {
         rl.setPrompt(buildPromptPrefix());
@@ -2689,18 +2697,25 @@ async function sendMessage(message) {
 
 async function sendStreamingMessage(message, images = [], rawMessage = '') {
   // Contextual thinking message derived from user input
-  const thinkingMessage = 'Thinking...';
+  const thinkingMessages = [
+    'Peeling...',
+    'Peeling back layers...',
+    'Ripening...',
+    'Bunching thoughts...',
+    'Swinging into action...',
+    'Splitting the problem...',
+    'Unpeeling the problem...',
+    'Swinging through logic...'
+  ];
+  let thinkingMessage = thinkingMessages[Math.floor(Math.random() * thinkingMessages.length)];
   let blockStatusOverride = null; // Set by onBlockProgress to show what's happening inside suppressed XML blocks
   const generatingMessages = [
-    'Writing code...',
-    'Crafting response...',
-    'Generating...',
-    'Building solution...',
-    'Creating magic...',
-    'Typing furiously...',
-    'Almost done...',
-    'Putting pieces together...',
-    'Polishing...'
+    'Peeling out code...',
+    'Slipping out a solution...',
+    'Top banana at work...',
+    'Bunching it together...',
+    'Almost ripe...',
+    'Polishing the peel...'
   ];
   const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let spinnerIndex = 0;
@@ -2727,19 +2742,22 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
       }
       currentMessage = generatingMessages[messageIndex % generatingMessages.length];
     } else {
-      // Show contextual thinking with elapsed time after 3s
+      // Rotate banana thinking puns every ~3 seconds, show elapsed time after 3s
+      if (tickCount % 30 === 0 && tickCount > 0) {
+        thinkingMessage = thinkingMessages[Math.floor(Math.random() * thinkingMessages.length)];
+      }
       const elapsed = Math.floor(tickCount / 10);
       currentMessage = elapsed >= 3 ? `${thinkingMessage} (${elapsed}s)` : thinkingMessage;
     }
 
     const tokenInfo = isGenerating ? ` ${c.dim}(${tokenCount} tokens)${c.reset}` : '';
-    const statusText = `${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${currentMessage}${c.reset}${tokenInfo}`;
+    const statusText = `${borderRenderer.prefix('thinking')}${c.yellow}${spinnerFrames[spinnerIndex]} ${currentMessage}${c.reset}${tokenInfo}`;
 
     if (isGenerating) {
       // During generation: show status on same line, don't interfere with output
     } else if (promptDuringWork) {
-      // Prompt is below spinner - use save/restore to update spinner line above
-      process.stdout.write(`\x1b[s\x1b[A\x1b[2K\x1b[0G${fitToTerminal(statusText)}\x1b[u`);
+      // Prompt is below spinner (with gap line between) - save cursor, move up 2, update, restore
+      process.stdout.write(`\x1b[s\x1b[A\x1b[A\x1b[2K\x1b[0G${fitToTerminal(statusText)}\x1b[u`);
       statusLineLength = statusText.length;
     } else {
       // During initial thinking: show on current line
@@ -2757,23 +2775,23 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
   const getStreamSpinnerText = () => {
     const elapsed = Math.floor(tickCount / 10);
     const msg = elapsed >= 3 ? `${thinkingMessage} (${elapsed}s)` : thinkingMessage;
-    return `${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${msg}${c.reset}`;
+    return `${borderRenderer.prefix('thinking')}${c.yellow}${spinnerFrames[spinnerIndex]} ${msg}${c.reset}`;
   };
 
   // Start the status animation with always-visible prompt below spinner
   const startThinking = () => {
-    process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[0]} ${thinkingMessage}${c.reset}`);
+    process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.yellow}${spinnerFrames[0]} ${thinkingMessage}${c.reset}`);
     statusInterval = setInterval(updateStatus, 100);
     // Show prompt below spinner so user can type at any time
     promptDuringWork = true;
     rl.setPrompt(buildPromptPrefix());
-    process.stdout.write('\n');
+    process.stdout.write('\n\n');
     rl.prompt(false);
     // Store re-render function for use by handleLine/flushSteerPasteBuffer
     renderWorkingPrompt = () => {
       const savedLine = rl.line || '';
       const savedCursor = rl.cursor || 0;
-      process.stdout.write(`${fitToTerminal(getStreamSpinnerText())}\n`);
+      process.stdout.write(`${fitToTerminal(getStreamSpinnerText())}\n\n`);
       rl.setPrompt(buildPromptPrefix());
       rl.prompt(false);
       if (savedLine) {
@@ -2793,15 +2811,16 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     isGenerating = true;
     messageIndex = 0;
     tickCount = 0;
-    // Clear prompt line and spinner line, then show AI label
+    // Clear prompt + gap + spinner, then show AI label
     if (promptDuringWork) {
-      process.stdout.write('\x1b[2K\x1b[0G');           // Clear prompt line
-      process.stdout.write('\x1b[A\x1b[2K\x1b[0G');     // Move up, clear spinner line
+      process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G'); // 3 lines
       promptDuringWork = false;
       renderWorkingPrompt = null;
     } else {
       process.stdout.write('\x1b[2K\x1b[0G');
     }
+    // Breathing room before AI response
+    console.log(borderRenderer.prefix('ai').trimEnd());
     const aiLabel = `${borderRenderer.prefix('ai')}${c.cyan}Banana →${c.reset} `;
     process.stdout.write(aiLabel);
     // Tell word wrapper how much of the first line is already used
@@ -2818,8 +2837,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
     if (promptDuringWork && rl) {
       const pendingInput = rl.line || '';
       rl.write(null, { ctrl: true, name: 'u' }); // Clear the readline buffer
-      process.stdout.write('\x1b[2K\x1b[0G');     // Clear prompt line
-      process.stdout.write('\x1b[A\x1b[2K\x1b[0G'); // Move up, clear spinner line
+      process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G'); // 3 lines
       if (restorePromptFn) restorePromptFn();
       if (pendingInput) {
         rl.write(pendingInput);
@@ -2870,6 +2888,8 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
   // Create abort controller for this request
   currentAbortController = new AbortController();
 
+  // Breathing room after user prompt
+  console.log(borderRenderer.prefix('user').trimEnd());
   // Start the fun thinking animation
   startThinking();
   if (statusBar) statusBar.startTiming();
@@ -2905,7 +2925,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
       } else if (blockType === 'run_command') {
         blockStatusOverride = `Generating command...`;
       }
-      // Don't override for think blocks - the default "Thinking..." is fine
+      // Don't override for think blocks - the rotating banana puns handle it
     },
     onToken: (token) => {
       // Transition from thinking to generating on first token
@@ -2930,6 +2950,7 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
       }
       const remaining = wordWrapper.flush();
       if (remaining) process.stdout.write(remaining);
+      console.log(''); // Breathing room after response
       fullResponse = response;
       stopStatus();
       midTurnSteerRequested = false; // Clear stale steer flag on normal completion
@@ -3376,9 +3397,14 @@ ${PAD}  Depth:    ${agent.depth}
 
   const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let spinnerIdx = 0;
+  const subAgentPuns = ['Peeling...', 'Bunching thoughts...', 'Ripening...', 'Swinging into action...', 'Splitting the problem...'];
+  let subAgentMsg = subAgentPuns[Math.floor(Math.random() * subAgentPuns.length)];
+  let subAgentTick = 0;
   const spinnerInterval = setInterval(() => {
     spinnerIdx = (spinnerIdx + 1) % spinnerFrames.length;
-    process.stdout.write(`\x1b[2K\x1b[0G${PAD}${c.cyan}${spinnerFrames[spinnerIdx]} Working...${c.reset}`);
+    subAgentTick++;
+    if (subAgentTick % 30 === 0) subAgentMsg = subAgentPuns[Math.floor(Math.random() * subAgentPuns.length)];
+    process.stdout.write(`\x1b[2K\x1b[0G${PAD}${c.yellow}${spinnerFrames[spinnerIdx]} ${subAgentMsg}${c.reset}`);
   }, 100);
 
   try {
@@ -3448,7 +3474,17 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     ask_human: '💬 Asking you'
   };
 
-  const agenticThinking = 'Thinking...';
+  const agenticThinkingMessages = [
+    'Peeling...',
+    'Peeling back layers...',
+    'Ripening...',
+    'Bunching thoughts...',
+    'Swinging into action...',
+    'Splitting the problem...',
+    'Unpeeling the problem...',
+    'Swinging through logic...'
+  ];
+  let agenticThinking = agenticThinkingMessages[Math.floor(Math.random() * agenticThinkingMessages.length)];
 
   // Reset prompt-during-work state from any previous run
   promptDuringWork = false;
@@ -3460,9 +3496,13 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
   let currentStatus = agenticThinking;
   let toolCallsDisplayed = [];
   let streamingStarted = false;
+  let lastPrintedNarration = false; // Track if narration was the last thing printed (for spacing)
   let spinnerTick = 0;
   let streamedTokenCount = 0;
   let stepCount = 0;
+
+  // ANSI sequence to clear prompt + gap + spinner (3 lines: prompt, blank gap, spinner)
+  const CLEAR_WORK_PROMPT = '\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G';
 
   // Get current spinner text for re-rendering after layout changes
   const getSpinnerText = () => {
@@ -3473,17 +3513,22 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
         displayStatus = `${currentStatus} (${elapsed}s)`;
       }
     }
-    return `${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[spinnerIndex]} ${displayStatus}${c.reset}`;
+    return `${borderRenderer.prefix('thinking')}${c.yellow}${spinnerFrames[spinnerIndex]} ${displayStatus}${c.reset}`;
   };
 
   const updateSpinner = () => {
     spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
     spinnerTick++;
+    // Rotate banana thinking puns every ~3 seconds during initial thinking
+    if (currentStatus === agenticThinking && spinnerTick % 30 === 0 && spinnerTick > 0) {
+      agenticThinking = agenticThinkingMessages[Math.floor(Math.random() * agenticThinkingMessages.length)];
+      currentStatus = agenticThinking;
+    }
     const statusText = fitToTerminal(getSpinnerText());
 
     if (promptDuringWork) {
-      // Prompt is below spinner - use save/restore to update spinner line above
-      process.stdout.write(`\x1b[s\x1b[A\x1b[2K\x1b[0G${statusText}\x1b[u`);
+      // Prompt is below spinner (with gap line between) - save cursor, move up 2, update, restore
+      process.stdout.write(`\x1b[s\x1b[A\x1b[A\x1b[2K\x1b[0G${statusText}\x1b[u`);
     } else {
       process.stdout.write(`\x1b[2K\x1b[0G${statusText}`);
     }
@@ -3493,19 +3538,19 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
   };
 
   const startSpinner = () => {
-    process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.cyan}${spinnerFrames[0]} ${currentStatus}${c.reset}`);
+    process.stdout.write(`\n${borderRenderer.prefix('thinking')}${c.yellow}${spinnerFrames[0]} ${currentStatus}${c.reset}`);
     statusInterval = setInterval(updateSpinner, 100);
     // Show prompt below spinner so user can type at any time
     promptDuringWork = true;
     rl.setPrompt(buildPromptPrefix());
-    process.stdout.write('\n');
+    process.stdout.write('\n\n');
     rl.prompt(false);
     // Store re-render function for use by handleLine/flushSteerPasteBuffer
     renderWorkingPrompt = () => {
       // Save user's in-progress input before redrawing
       const savedLine = rl.line || '';
       const savedCursor = rl.cursor || 0;
-      process.stdout.write(`${fitToTerminal(getSpinnerText())}\n`);
+      process.stdout.write(`${fitToTerminal(getSpinnerText())}\n\n`);
       rl.setPrompt(buildPromptPrefix());
       rl.prompt(false);
       // Restore user's typed text so tool call updates don't erase it
@@ -3531,8 +3576,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       // Save any in-progress steer text before clearing the line
       const pendingInput = rl.line || '';
       rl.write(null, { ctrl: true, name: 'u' }); // Clear the readline buffer
-      process.stdout.write('\x1b[2K\x1b[0G');     // Clear prompt line
-      process.stdout.write('\x1b[A\x1b[2K\x1b[0G'); // Move up, clear spinner line
+      process.stdout.write(CLEAR_WORK_PROMPT);    // Clear prompt + gap + spinner
       if (restorePromptFn) restorePromptFn();
       // If user was mid-typing a steer, restore their text
       if (pendingInput) {
@@ -3606,6 +3650,8 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
     }
   }
 
+  // Breathing room after user prompt
+  console.log(borderRenderer.prefix('user').trimEnd());
   startSpinner();
   if (statusBar) statusBar.startTiming();
 
@@ -3649,25 +3695,30 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           if (result?._mcp && success) {
             last.mcpPreview = JSON.stringify(result.result || '').slice(0, 100);
           } else if (result?.error) {
-            last.errorMsg = String(result.error).slice(0, 120);
+            last.errorMsg = String(result.error).split('\n')[0].slice(0, 60);
           }
           // Print completed step as a permanent line
           const icon = toolMessages[tool]?.split(' ')[0] || '🔧';
           let detail = last.args.path || last.args.pattern || last.args.command || last.args.query || last.args.question || (tool === 'call_mcp' ? last.args.tool : '') || (tool === 'spawn_agent' ? last.args.model : '') || '';
-          const maxLen = Math.max(20, (process.stdout.columns || 120) - 20);
+          const maxLen = Math.max(20, (process.stdout.columns || 120) - 40);
           if (detail.length > maxLen) detail = detail.slice(0, maxLen - 3) + '...';
           const label = detail || (toolMessages[tool] || tool).replace(/^\S+\s*/, '');
           const status = success === false
             ? `${c.red}✗${c.reset}`
-            : `${c.green}✓${c.reset}`;
+            : `${c.dim}✓${c.reset}`;
           const errInfo = (!success && last.errorMsg) ? ` ${c.red}${last.errorMsg}${c.reset}` : '';
           const timing = elapsed ? ` ${c.dim}(${(elapsed / 1000).toFixed(1)}s)${c.reset}` : '';
           // Clear spinner line, print permanent step, restart spinner on next line
           if (promptDuringWork) {
-            // Clear prompt line, move up and clear spinner line
-            process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+            // Clear prompt + gap + spinner (3 lines)
+            process.stdout.write(CLEAR_WORK_PROMPT);
           } else {
             process.stdout.write(`\x1b[2K\x1b[0G`);
+          }
+          // Blank line after narration before next step
+          if (lastPrintedNarration) {
+            console.log(borderRenderer.prefix('tool').trimEnd());
+            lastPrintedNarration = false;
           }
           console.log(`${borderRenderer.prefix('tool')}${status} ${c.dim}${last.stepNum}. ${icon} ${label}${errInfo}${c.reset}${timing}`);
           if (promptDuringWork && renderWorkingPrompt) {
@@ -3685,11 +3736,16 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
         if (narration.length > 120) narration = narration.slice(0, 117) + '...';
         if (narration) {
           if (promptDuringWork) {
-            process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+            process.stdout.write(CLEAR_WORK_PROMPT);
           } else {
             process.stdout.write(`\x1b[2K\x1b[0G`);
           }
-          console.log(`${borderRenderer.prefix('thinking')}${c.cyan}> ${narration}${c.reset}`);
+          // Blank line between step groups and narration
+          if (toolCallsDisplayed.length > 0) {
+            console.log(borderRenderer.prefix('thinking').trimEnd());
+          }
+          console.log(`${borderRenderer.prefix('thinking')}${c.cyan}🍌 ${narration}${c.reset}`);
+          lastPrintedNarration = true;
           if (promptDuringWork && renderWorkingPrompt) {
             renderWorkingPrompt();
           }
@@ -3706,13 +3762,12 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           // status bar area, causing the entire response to be invisible.
           if (statusBar) statusBar.install();
 
-          // Brief summary line if there were steps
-          if (toolCallsDisplayed.length > 0) {
-            const stepWord = toolCallsDisplayed.length === 1 ? 'step' : 'steps';
-            console.log(`${borderRenderer.prefix('tool')}${c.dim}── ${toolCallsDisplayed.length} ${stepWord} completed ──${c.reset}`);
-          }
-
-          const agenticAiLabel = `${borderRenderer.prefix('ai')}${c.cyan}Banana →${c.reset} `;
+          // Breathing room before AI response
+          console.log(borderRenderer.prefix('ai').trimEnd());
+          const stepsSuffix = toolCallsDisplayed.length > 0
+            ? ` ${c.dim}(${toolCallsDisplayed.length} ${toolCallsDisplayed.length === 1 ? 'step' : 'steps'})${c.reset}`
+            : '';
+          const agenticAiLabel = `${borderRenderer.prefix('ai')}${c.cyan}Banana${c.reset}${stepsSuffix}${c.cyan} →${c.reset} `;
           process.stdout.write(agenticAiLabel);
           wordWrapper.currentLineLength = borderRenderer.stripAnsi(agenticAiLabel).length;
         }
@@ -3737,6 +3792,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
         }
         const remaining = wordWrapper.flush();
         if (remaining) process.stdout.write(remaining);
+        console.log(''); // Breathing room after response
 
         if (!streamingStarted) {
           // Edge case: empty response, no tokens fired
@@ -3746,16 +3802,18 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       onReasoning: (reasoning) => {
         // Clear spinner+prompt before printing reasoning block
         if (promptDuringWork) {
-          process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+          process.stdout.write(CLEAR_WORK_PROMPT);
         } else {
           process.stdout.write('\x1b[2K\x1b[0G');
         }
+        console.log(borderRenderer.prefix('thinking').trimEnd());
         console.log(`${borderRenderer.prefix('thinking')}${c.dim}┌─ 🧠 Reasoning${c.reset}`);
         const lines = reasoning.trim().split('\n');
         for (const line of lines) {
           console.log(`${borderRenderer.prefix('thinking')}${c.dim}│ ${line}${c.reset}`);
         }
         console.log(`${borderRenderer.prefix('thinking')}${c.dim}└─${c.reset}`);
+        console.log(borderRenderer.prefix('thinking').trimEnd());
         // Re-render spinner + prompt after reasoning block
         if (promptDuringWork && renderWorkingPrompt) {
           renderWorkingPrompt();
@@ -3763,7 +3821,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       },
       onWarning: (msg) => {
         if (promptDuringWork) {
-          process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+          process.stdout.write(CLEAR_WORK_PROMPT);
           console.log(`${PAD}${c.yellow}⚠ ${msg}${c.reset}`);
           if (renderWorkingPrompt) renderWorkingPrompt();
         } else {
@@ -3785,10 +3843,9 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
             statusInterval = null;
           }
 
-          // Clear spinner + prompt lines if active
+          // Clear spinner + gap + prompt lines if active
           if (promptDuringWork) {
-            process.stdout.write('\x1b[2K\x1b[0G');           // Clear prompt line
-            process.stdout.write('\x1b[A\x1b[2K\x1b[0G');     // Move up, clear spinner line
+            process.stdout.write(CLEAR_WORK_PROMPT);
           } else {
             process.stdout.write('\x1b[2K\x1b[0G');
           }
@@ -3879,7 +3936,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
 
           // Clear spinner+prompt before sub-agent output
           if (promptDuringWork) {
-            process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+            process.stdout.write(CLEAR_WORK_PROMPT);
           } else {
             process.stdout.write(`\x1b[2K\x1b[0G`);
           }
@@ -3893,7 +3950,7 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
           subAgentManager.onAgentToolCall = (agent, tool, toolArgs) => {
             const detail = toolArgs.path || toolArgs.pattern || toolArgs.command || toolArgs.query || '';
             if (promptDuringWork) {
-              process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+              process.stdout.write(CLEAR_WORK_PROMPT);
             }
             console.log(`${borderRenderer.prefix('tool')}${c.dim}  | > ${tool} ${detail}${c.reset}`);
             if (promptDuringWork && renderWorkingPrompt) renderWorkingPrompt();
@@ -3903,14 +3960,14 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
             const tokens = agent.tokens?.total ? `${(agent.tokens.total / 1000).toFixed(1)}k tokens` : '';
             const steps = agent.toolCalls?.length || 0;
             if (promptDuringWork) {
-              process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+              process.stdout.write(CLEAR_WORK_PROMPT);
             }
             console.log(`${borderRenderer.prefix('tool')}${c.dim}  +-- Complete (${steps} steps, ${elapsed}s${tokens ? ', ' + tokens : ''})${c.reset}`);
             if (promptDuringWork && renderWorkingPrompt) renderWorkingPrompt();
           };
           subAgentManager.onAgentError = (agent, err) => {
             if (promptDuringWork) {
-              process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+              process.stdout.write(CLEAR_WORK_PROMPT);
             }
             console.log(`${borderRenderer.prefix('tool')}${c.red}  +-- Failed: ${err.message || err}${c.reset}`);
             if (promptDuringWork && renderWorkingPrompt) renderWorkingPrompt();
@@ -4071,10 +4128,12 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
 
 async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-  const modeColors = { work: c.cyan, plan: c.cyan, ask: c.magenta };
+  const modeColors = { work: c.yellow, plan: c.yellow, ask: c.magenta };
   let i = 0;
   let spinTick = 0;
   if (statusBar) statusBar.startTiming();
+  // Breathing room after user prompt
+  console.log(borderRenderer.prefix('user').trimEnd());
   const spinner = setInterval(() => {
     process.stdout.write(`\r${borderRenderer.prefix('thinking')}${modeColors[interactionMode]}${frames[i]} ${c.dim}Banana is thinking...${c.reset}`);
     i = (i + 1) % frames.length;
@@ -4140,7 +4199,8 @@ async function sendNonStreamingMessage(message, images = [], rawMessage = '') {
 
     if (statusBar) statusBar.stopTiming();
     const { renderMarkdown } = require('./lib/markdownRenderer');
-    console.log(`\n${borderRenderer.prefix('ai')}${c.cyan}Banana →${c.reset} `);
+    console.log(`\n${borderRenderer.prefix('ai').trimEnd()}`);
+    console.log(`${borderRenderer.prefix('ai')}${c.cyan}Banana →${c.reset} `);
     console.log(renderMarkdown(reply));
     console.log();
 
@@ -4481,7 +4541,7 @@ async function handleCommands(commands) {
         if (spinnerInterval) return;
         spinnerInterval = setInterval(() => {
           const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-          process.stdout.write(`\r${PAD}${c.cyan}│ ${c.dim}${frames[frameIndex]} Working... (${elapsed}s)${c.reset}    `);
+          process.stdout.write(`\r${PAD}${c.dim}│${c.reset} ${c.yellow}${frames[frameIndex]} Working... (${elapsed}s)${c.reset}    `);
           frameIndex = (frameIndex + 1) % frames.length;
         }, 80);
       };
@@ -4764,9 +4824,9 @@ function createReadlineInterface() {
           }
           currentAbortController.abort();
           lastEscapeTime = 0;
-          // Force-clear spinner + prompt lines in case abort doesn't propagate immediately
+          // Force-clear spinner + gap + prompt lines in case abort doesn't propagate immediately
           if (promptDuringWork) {
-            process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+            process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
             promptDuringWork = false;
             renderWorkingPrompt = null;
             if (restorePromptFn) restorePromptFn();
@@ -5158,6 +5218,8 @@ Examples:
 
     // Send message to AI
     await sendMessage(trimmed);
+    // Breathing room between AI response and next prompt
+    console.log('');
     showPrompt();
   };
 
@@ -5198,13 +5260,13 @@ Examples:
     if (cleanText) {
       if (lineCount > 1 && promptDuringWork) {
         // Print paste indicator above spinner+prompt
-        process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+        process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
         console.log(`${PAD}${c.dim}(pasted ${lineCount} lines as steering)${c.reset}`);
         if (renderWorkingPrompt) renderWorkingPrompt();
       }
       if (requestMidTurnSteer(cleanText)) {
         if (promptDuringWork) {
-          process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+          process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
           console.log(`${PAD}${c.cyan}Steering received. Redirecting...${c.reset}`);
           if (renderWorkingPrompt) renderWorkingPrompt();
         } else {
@@ -5212,7 +5274,7 @@ Examples:
         }
       } else {
         if (promptDuringWork) {
-          process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+          process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
           console.log(`${PAD}${c.yellow}Could not apply steering.${c.reset}`);
           if (renderWorkingPrompt) renderWorkingPrompt();
         } else {
@@ -5262,13 +5324,14 @@ Examples:
           // Empty Enter: restore spinner+prompt layout.
           // After readline's Enter, cursor is at N+2. Layout:
           //   N:   spinner
-          //   N+1: > (empty prompt)
-          //   N+2: [cursor - readline's newline]
-          // Move up to spinner line (N), clear all 3 lines, re-render.
+          //   N+1: (gap line)
+          //   N+2: > (empty prompt)
+          //   N+3: [cursor - readline's newline]
+          // Move up to spinner line (N), clear all 4 lines, re-render.
           if (promptDuringWork) {
-            process.stdout.write('\x1b[A\x1b[2K\x1b[A\x1b[2K\x1b[0G');
-            // Clear the leftover line at N+2 as well
-            process.stdout.write('\x1b[B\x1b[B\x1b[2K\x1b[A\x1b[A\x1b[0G');
+            process.stdout.write('\x1b[A\x1b[2K\x1b[A\x1b[2K\x1b[A\x1b[2K\x1b[0G');
+            // Clear the leftover line at N+3 as well
+            process.stdout.write('\x1b[B\x1b[B\x1b[B\x1b[2K\x1b[A\x1b[A\x1b[A\x1b[0G');
             if (renderWorkingPrompt) renderWorkingPrompt();
           }
           return;
@@ -5280,11 +5343,11 @@ Examples:
         steerPasteTimer = setTimeout(flushSteerPasteBuffer, PASTE_DELAY_MS);
 
         // Fix layout: readline added a newline after submitted text.
-        // Cursor at N+2, spinner at N, old prompt+text at N+1.
+        // Cursor at N+3, spinner at N, gap at N+1, old prompt+text at N+2.
         // Move to spinner line, clear all, re-render spinner+prompt.
         if (promptDuringWork) {
-          process.stdout.write('\x1b[A\x1b[2K\x1b[A\x1b[2K\x1b[0G');
-          process.stdout.write('\x1b[B\x1b[B\x1b[2K\x1b[A\x1b[A\x1b[0G');
+          process.stdout.write('\x1b[A\x1b[2K\x1b[A\x1b[2K\x1b[A\x1b[2K\x1b[0G');
+          process.stdout.write('\x1b[B\x1b[B\x1b[B\x1b[2K\x1b[A\x1b[A\x1b[A\x1b[0G');
           if (renderWorkingPrompt) renderWorkingPrompt();
         }
       }
@@ -5328,8 +5391,8 @@ Examples:
       // During work with prompt visible: re-render prompt on resize
       if (promptDuringWork && currentAbortController) {
         if (renderWorkingPrompt) {
-          // Re-render both spinner and prompt for new terminal width
-          process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
+          // Re-render spinner + gap + prompt for new terminal width
+          process.stdout.write('\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G\x1b[A\x1b[2K\x1b[0G');
           renderWorkingPrompt();
         } else {
           rl.prompt(true);
