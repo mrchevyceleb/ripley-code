@@ -9,7 +9,7 @@
       "supportsThinking": false,
       "prompt": "code-agent",
       "inferenceSettings": { "temperature": 0.7, "topP": 0.9 },
-      "tags": ["coding", "max-quality", "agentic", "tool-calling"],
+      "tags": ["coding", "max-quality", "agentic", "tool-calling", "vision"],
       "tier": "silverback",
       "description": "Best quality. Heavy coding, full builds, complex tasks.",
       "provider": "monkey"
@@ -22,7 +22,7 @@
       "supportsThinking": false,
       "prompt": "code-agent",
       "inferenceSettings": { "temperature": 0.7, "topP": 0.9 },
-      "tags": ["coding", "balanced", "agentic", "tool-calling"],
+      "tags": ["coding", "balanced", "agentic", "tool-calling", "vision"],
       "tier": "mandrill",
       "description": "Balanced. Everyday coding, solid quality + speed.",
       "provider": "monkey"
@@ -35,7 +35,7 @@
       "supportsThinking": false,
       "prompt": "code-agent",
       "inferenceSettings": { "temperature": 0.7, "topP": 0.9 },
-      "tags": ["fast", "quick-fixes", "tool-calling"],
+      "tags": ["fast", "quick-fixes", "tool-calling", "vision"],
       "tier": "gibbon",
       "description": "Fast. Quick fixes, autocomplete, rapid iteration.",
       "provider": "monkey"
@@ -48,7 +48,7 @@
       "supportsThinking": false,
       "prompt": "code-agent",
       "inferenceSettings": { "temperature": 0.7, "topP": 0.9 },
-      "tags": ["budget", "simple-tasks", "tool-calling"],
+      "tags": ["budget", "simple-tasks", "tool-calling", "vision"],
       "tier": "tamarin",
       "description": "Budget. Simple tasks, boilerplate, routine work.",
       "provider": "monkey"

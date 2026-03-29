@@ -522,6 +522,8 @@ function initProject() {
     const visionProvider = visionModel?.provider || 'local';
     if (visionProvider === 'local') {
       console.log(`${PAD}${c.green}✓${c.reset} Vision: local model (direct)`);
+    } else if (visionProvider === 'monkey') {
+      console.log(`${PAD}${c.green}✓${c.reset} Vision: Monkey Models (server-side)`);
     } else {
       const providerLabel = PROVIDER_LABELS[visionProvider] || visionProvider;
       console.log(`${PAD}${c.green}✓${c.reset} Vision: ${providerLabel} model (direct)`);
@@ -960,7 +962,24 @@ function buildFullSystemPrompt(promptMode = resolveActivePromptMode()) {
 
 function estimateTokensForValue(value) {
   if (value === null || value === undefined) return 0;
-  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  let text;
+  if (typeof value === 'string') {
+    text = value;
+  } else {
+    // Strip base64 image data before estimating to avoid wildly inflated counts.
+    // Image tokens are counted differently by providers and base64 strings
+    // (~1.3x the image size) would dominate the estimate.
+    try {
+      text = JSON.stringify(value, (key, val) => {
+        if (key === 'url' && typeof val === 'string' && val.startsWith('data:image/')) {
+          return '[image]';
+        }
+        return val;
+      });
+    } catch {
+      return 0;
+    }
+  }
   if (!text) return 0;
   if (tokenCounter) return tokenCounter.estimateTokens(text);
   return Math.ceil(text.length / 3.5);
@@ -2590,10 +2609,14 @@ async function sendMessage(message) {
     if (modelRegistry.currentSupportsVision()) {
       const visionModel = modelRegistry.getCurrentModel();
       const visionProvider = visionModel?.provider || 'local';
-      const providerLabel = visionProvider === 'local'
-        ? 'local'
-        : (PROVIDER_LABELS[visionProvider] || visionProvider);
-      console.log(`${PAD}${c.green}✓ Using ${providerLabel} vision model${c.reset}`);
+      if (visionProvider === 'monkey') {
+        console.log(`${PAD}${c.green}✓ Sending image via Monkey Models${c.reset}`);
+      } else {
+        const providerLabel = visionProvider === 'local'
+          ? 'local'
+          : (PROVIDER_LABELS[visionProvider] || visionProvider);
+        console.log(`${PAD}${c.green}✓ Using ${providerLabel} vision model${c.reset}`);
+      }
     } else if (visionAnalyzer.isEnabled()) {
       // Gemini fallback - convert images to text analysis
       console.log(`${PAD}${c.cyan}🔍 Analyzing image(s) with Gemini...${c.reset}`);
