@@ -1,0 +1,34 @@
+# Git
+.git
+.gitignore
+
+# Logs and Temp
+logs/
+tmp/
+*.log
+nul
+
+# Documentation and Notes
+docs/
+notes/
+CLAUDE.md
+agents.md
+commands.md
+hooks.md
+models.md
+monkey-models.md
+overview.md
+project-instructions.md
+model-research.md
+README.md
+
+# Config and Local Data
+*.json
+!package.json
+!models.json
+!package-lock.json
+.banana/
+
+# OS files
+.DS_Store
+Thumbs.db

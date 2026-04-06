@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 ## What is Banana Code?
 
-An AI coding agent CLI (v1.2.0) powered by **Monkey Models** (cloud) with remote provider fallbacks. Users run `banana` in their project directory to get AI-assisted coding with file operations, streaming responses, model tier switching, vision support, and agentic tool calling.
+An AI coding agent CLI (v1.3.0) powered by **Monkey Models** (cloud) with remote provider fallbacks. Users run `banana` in their project directory to get AI-assisted coding with file operations, streaming responses, model tier switching, vision support, and agentic tool calling.
 
 ## Architecture
 

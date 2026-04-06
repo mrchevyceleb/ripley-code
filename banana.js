@@ -21,6 +21,7 @@ const readline = require('readline');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const updateNotifier = require('update-notifier');
 
 const FileManager = require('./lib/fileManager');
 const ContextBuilder = require('./lib/contextBuilder');
@@ -80,7 +81,7 @@ let pendingHumanQuestion = null; // { resolve, question }
 // CONFIGURATION
 // =============================================================================
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const { PAD } = require('./lib/borderRenderer'); // Single source of truth for left padding
 const DEBUG_DISABLED_VALUES = new Set(['0', 'false', 'off', 'no']);
 const NEXT_TURN_RESERVE_TOKENS = 1200;
@@ -257,6 +258,19 @@ function logSessionEnd(reason, detail = '') {
   appendDebugLog(`=== session_end ${new Date().toISOString()} reason=${reason}${detail} ===\n`);
 }
 
+function notifyIfUpdateAvailable() {
+  if (!process.stdout.isTTY) return;
+  try {
+    const notifier = updateNotifier({
+      pkg: { name: 'banana-code', version: VERSION },
+      updateCheckInterval: 1000 * 60 * 60 * 12
+    });
+    notifier.notify({ isGlobal: true, defer: false });
+  } catch {
+    // Update checks are best-effort; never fail startup.
+  }
+}
+
 // =============================================================================
 // ASCII ART & UI
 // =============================================================================
@@ -391,6 +405,8 @@ ${P}${c.yellow}/run <cmd>${c.reset}          Run a shell command
 ${P}${c.yellow}/undo${c.reset}               Show recent backups
 ${P}${c.yellow}/restore <path>${c.reset}     Restore file from backup
 ${P}${c.yellow}/commands${c.reset}           List custom commands (~/.banana/commands/)
+${P}${c.yellow}/update${c.reset}             Update Banana via npm
+
 ${P}${c.yellow}/version${c.reset}            Show version
 ${P}${c.yellow}/help${c.reset}               Show this help
 ${P}${c.yellow}/exit${c.reset}               Exit Banana
@@ -608,7 +624,8 @@ async function getActiveClient() {
 }
 
 async function syncLocalModelToLmStudio(activeModel) {
-  if (!activeModel || (activeModel.provider || 'local') !== 'local' || !activeModel.id) return;
+  if (!activeModel || activeModel.dynamic) return; // Dynamic LM Studio models are user-managed
+  if ((activeModel.provider || 'local') !== 'local' || !activeModel.id) return;
   try {
     const loaded = await lmStudio.getLoadedInstances();
     const activeLoaded = loaded.some(inst => (inst.key || inst.id || '').includes(activeModel.id));
@@ -638,14 +655,13 @@ async function checkConnection() {
   const activeModel = modelRegistry.getCurrentModel();
 
   const lmConnected = await lmStudio.isConnected();
+  await modelRegistry.refreshLmStudio();
   if (lmConnected) {
-    console.log(`${PAD}${c.green}✓${c.reset} LM Studio: Connected (${lmStudio.baseUrl})`);
-    const discovery = await modelRegistry.discover();
-    if (discovery.matched > 0) {
-      console.log(`${PAD}${c.green}✓${c.reset} Models: ${discovery.matched} matched from ${discovery.total} loaded`);
-    }
-    if (activeProvider === 'local') {
-      await syncLocalModelToLmStudio(activeModel);
+    const lmModel = modelRegistry.get('lmstudio');
+    if (lmModel && lmModel.id) {
+      console.log(`${PAD}${c.green}✓${c.reset} LM Studio: ${lmModel.name} (${lmStudio.baseUrl})`);
+    } else {
+      console.log(`${PAD}${c.yellow}○${c.reset} LM Studio: Connected, no model loaded (${lmStudio.baseUrl})`);
     }
   } else {
     const prefix = activeProvider === 'local' ? c.red : c.yellow;
@@ -1234,29 +1250,14 @@ async function switchModel(modelKey, options = {}) {
 
   const provider = switched.provider || 'local';
   if (provider === 'local') {
-    if (switched.id && (!oldModel || switched.id !== oldModel.id || (oldModel.provider || 'local') !== 'local')) {
-      try {
-        const loaded = await lmStudio.getLoadedInstances();
-        for (const inst of loaded) {
-          try {
-            await lmStudio.unloadModel(inst.instanceId);
-            if (!silent) console.log(`${PAD}${c.dim}Unloaded ${inst.displayName || inst.key}${c.reset}`);
-          } catch (err) {
-            // 404 = model already ejected by LM Studio (normal during swap)
-            if (!silent && !err.message.includes('404')) {
-              console.log(`${PAD}${c.yellow}⚠ Could not unload ${inst.key}: ${err.message}${c.reset}`);
-            }
-          }
-        }
-        const ctxLen = switched.contextLimit || 32768;
-        if (!silent) console.log(`${PAD}${c.dim}Loading ${switched.name} in LM Studio (ctx: ${(ctxLen / 1024).toFixed(0)}K)...${c.reset}`);
-        const result = await lmStudio.loadModel(switched.id, { contextLength: ctxLen });
-        if (!silent) console.log(`${PAD}${c.green}✓ Loaded in ${result.load_time_seconds?.toFixed(1)}s${c.reset}`);
-      } catch (err) {
-        if (!silent) {
-          console.log(`${PAD}${c.yellow}⚠ Could not auto-load: ${err.message}${c.reset}`);
-          console.log(`${PAD}${c.dim}Load it manually in LM Studio${c.reset}`);
-        }
+    if (switched.dynamic) {
+      // Dynamic LM Studio model - refresh to get latest loaded model info
+      await modelRegistry.refreshLmStudio();
+      const refreshed = modelRegistry.get('lmstudio');
+      if (refreshed && refreshed.id) {
+        if (!silent) console.log(`${PAD}${c.green}✓ Using ${refreshed.name}${c.reset}`);
+      } else {
+        if (!silent) console.log(`${PAD}${c.yellow}⚠ LM Studio connected but no model loaded${c.reset}`);
       }
     }
     if (switched.tags?.includes('vision') && !silent) {
@@ -1372,7 +1373,7 @@ async function handleCommand(input) {
       console.log(`\n${PAD}${c.cyan}Checking for updates...${c.reset}`);
       const { execSync } = require('child_process');
       try {
-        const result = execSync('npm install -g mrchevyceleb/banana-code', {
+        const result = execSync('npm install -g banana-code@latest', {
           encoding: 'utf-8',
           timeout: 60000,
           stdio: ['pipe', 'pipe', 'pipe']
@@ -2004,7 +2005,8 @@ async function handleCommand(input) {
       const modelArg = modelArgRaw.toLowerCase();
 
       if (!modelArg) {
-        // Interactive model picker
+        // Refresh LM Studio state before showing picker
+        await modelRegistry.refreshLmStudio();
         const models = modelRegistry.list();
         const current = modelRegistry.getCurrent();
         const pickerItems = models.map(m => ({
@@ -2793,13 +2795,18 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
       if (_renderingWorkPrompt) return; // prevent re-entrancy cascade
       _renderingWorkPrompt = true;
       try {
-        const savedLine = rl.line || '';
+        // rl.prompt(false) redraws the prompt + whatever is already in rl.line,
+        // but always places cursor at end. Save/restore cursor position so the
+        // user can keep typing mid-line without the cursor jumping.
+        const savedCursor = rl.cursor;
         process.stdout.write(`${fitToTerminal(getStreamSpinnerText())}\n\n`);
         rl.setPrompt(buildPromptPrefix());
         rl.prompt(false);
-        if (savedLine) {
-          rl.write(savedLine);
-          // Note: cursor position resets to end-of-line; readline doesn't support mid-line restore
+        if (savedCursor < rl.line.length) {
+          // Move cursor back from end-of-line to saved position
+          const moveBack = rl.line.length - savedCursor;
+          process.stdout.write(`\x1b[${moveBack}D`);
+          rl.cursor = savedCursor;
         }
         if (statusBar) statusBar.render();
       } finally {
@@ -2901,6 +2908,11 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
   // Start the fun thinking animation
   startThinking();
   if (statusBar) statusBar.startTiming();
+
+  // Refresh LM Studio model info if active (picks up model swaps between messages)
+  if (modelRegistry.getCurrentModel()?.dynamic) {
+    await modelRegistry.refreshLmStudio();
+  }
 
   const streamInferenceSettings = modelRegistry.getInferenceSettings();
   const activeClient = await getActiveClient();
@@ -3559,15 +3571,17 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       if (_renderingWorkPrompt) return; // prevent re-entrancy cascade
       _renderingWorkPrompt = true;
       try {
-        // Save user's in-progress input before redrawing
-        const savedLine = rl.line || '';
+        // rl.prompt(false) redraws the prompt + whatever is already in rl.line,
+        // but always places cursor at end. Save/restore cursor position so the
+        // user can keep typing mid-line without the cursor jumping.
+        const savedCursor = rl.cursor;
         process.stdout.write(`${fitToTerminal(getSpinnerText())}\n\n`);
         rl.setPrompt(buildPromptPrefix());
         rl.prompt(false);
-        // Restore user's typed text so tool call updates don't erase it
-        if (savedLine) {
-          rl.write(savedLine);
-          // Note: cursor position resets to end-of-line; readline doesn't support mid-line restore
+        if (savedCursor < rl.line.length) {
+          const moveBack = rl.line.length - savedCursor;
+          process.stdout.write(`\x1b[${moveBack}D`);
+          rl.cursor = savedCursor;
         }
         if (statusBar) statusBar.render();
       } finally {
@@ -3929,12 +3943,15 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
             if (_renderingWorkPrompt) return; // prevent re-entrancy cascade
             _renderingWorkPrompt = true;
             try {
-              const savedLine = rl.line || '';
+              // rl.prompt(false) redraws the prompt + whatever is already in rl.line,
+              // but always places cursor at end. Save/restore cursor position.
+              const savedCursor = rl.cursor;
               process.stdout.write(`${fitToTerminal(getSpinnerText())}\n`);
               rl.prompt(false);
-              if (savedLine) {
-                rl.write(savedLine);
-                // Note: cursor position resets to end-of-line; readline doesn't support mid-line restore
+              if (savedCursor < rl.line.length) {
+                const moveBack = rl.line.length - savedCursor;
+                process.stdout.write(`\x1b[${moveBack}D`);
+                rl.cursor = savedCursor;
               }
               if (statusBar) statusBar.render();
             } finally {
@@ -4012,6 +4029,11 @@ async function sendAgenticMessage(message, images = [], rawMessage = '') {
       ])
     });
     currentRunner = runner;
+
+    // Refresh LM Studio model info if active (picks up model swaps between messages)
+    if (modelRegistry.getCurrentModel()?.dynamic) {
+      await modelRegistry.refreshLmStudio();
+    }
 
     // Use model-specific inference settings
     currentAbortController = new AbortController();
@@ -4957,6 +4979,7 @@ Examples:
   // Show banner and initialize
   await showBanner();
   initProject();
+  notifyIfUpdateAvailable();
   if (runtimeLogPath) {
     console.log(`${PAD}${c.dim}Logs: ${runtimeLogPath}${c.reset}`);
   }

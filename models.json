@@ -27,19 +27,6 @@
       "description": "Balanced. Everyday coding, solid quality + speed.",
       "provider": "monkey"
     },
-    "gibbon": {
-      "name": "Gibbon",
-      "id": "gibbon",
-      "contextLimit": 262000,
-      "maxOutputTokens": 65536,
-      "supportsThinking": false,
-      "prompt": "code-agent",
-      "inferenceSettings": { "temperature": 0.7, "topP": 0.9 },
-      "tags": ["fast", "quick-fixes", "tool-calling", "vision"],
-      "tier": "gibbon",
-      "description": "Fast. Quick fixes, autocomplete, rapid iteration.",
-      "provider": "monkey"
-    },
     "tamarin": {
       "name": "Tamarin",
       "id": "tamarin",
