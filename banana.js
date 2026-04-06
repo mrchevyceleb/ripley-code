@@ -81,7 +81,7 @@ let pendingHumanQuestion = null; // { resolve, question }
 // CONFIGURATION
 // =============================================================================
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const { PAD } = require('./lib/borderRenderer'); // Single source of truth for left padding
 const DEBUG_DISABLED_VALUES = new Set(['0', 'false', 'off', 'no']);
 const NEXT_TURN_RESERVE_TOKENS = 1200;
@@ -389,7 +389,7 @@ ${P}${c.yellow}/hooks${c.reset}               Manage lifecycle hooks (add, edit,
 ${P}${c.yellow}/steer <text>${c.reset}       Steer next turn (or interrupt + redirect current turn)
 ${P}${c.yellow}/model [name]${c.reset}      Show/switch model
 ${P}${c.yellow}/model search <query>${c.reset} Search OpenRouter models and add one
-${P}${c.yellow}/connect [provider]${c.reset} Connect provider (Anthropic, OpenAI OAuth, OpenRouter)
+${P}${c.yellow}/connect [provider]${c.reset} Connect provider (Anthropic, OpenAI, OpenRouter, Claude Code)
 ${P}${c.yellow}/prompt [name]${c.reset}     Show/switch prompt (base, code-agent, or any .md)
 
 ${P}${c.banana}${c.dim}Config Commands:${c.reset}
@@ -922,6 +922,7 @@ function normalizeProviderKey(raw) {
   const key = String(raw || '').trim().toLowerCase();
   if (!key) return null;
   if (key === 'lmstudio' || key === 'local') return 'local';
+  if (key === 'claude' || key === 'claudecode' || key === 'claude-code') return 'claude-code';
   if (PROVIDERS.includes(key)) return key;
   return null;
 }
@@ -1315,7 +1316,9 @@ async function connectProviderInteractive(provider) {
       label: PROVIDER_LABELS[p] || p,
       description: p === 'openai'
         ? 'OAuth device login for Codex subscription'
-        : 'Connect with API key',
+        : p === 'claude-code'
+          ? 'Use your Claude Code CLI subscription (no API key needed)'
+          : 'Connect with API key',
       tags: ['provider'],
       active: providerStore.isConnected(p)
     }));
@@ -1357,6 +1360,29 @@ async function connectProviderInteractive(provider) {
     modelRegistry.refreshRemoteModels();
     console.log(`${PAD}${c.green}✓ Connected OpenAI via OAuth${c.reset}`);
     console.log(`${PAD}${c.dim}Use /model to switch to OpenAI Codex models.${c.reset}\n`);
+    return;
+  }
+
+  if (provider === 'claude-code') {
+    console.log(`\n${PAD}${c.cyan}Claude Code CLI Connection${c.reset}`);
+    console.log(`${PAD}${c.dim}Checking for Claude Code CLI...${c.reset}`);
+
+    const { ClaudeCodeClient } = require('./lib/claudeCodeProvider');
+    const claudeClient = new ClaudeCodeClient();
+    const connected = await claudeClient.isConnected();
+
+    if (!connected) {
+      console.log(`${PAD}${c.red}✗ Claude Code CLI not found.${c.reset}`);
+      console.log(`${PAD}${c.dim}Install it: npm install -g @anthropic-ai/claude-code${c.reset}`);
+      console.log(`${PAD}${c.dim}Then run: claude login${c.reset}\n`);
+      return;
+    }
+
+    providerStore.connectClaudeCode();
+    modelRegistry.refreshRemoteModels();
+    console.log(`${PAD}${c.green}✓ Connected Claude Code CLI${c.reset}`);
+    console.log(`${PAD}${c.dim}Uses your existing Claude subscription (no API key needed).${c.reset}`);
+    console.log(`${PAD}${c.dim}Use /model to switch to Claude Code models.${c.reset}\n`);
     return;
   }
 
@@ -2136,7 +2162,7 @@ async function handleCommand(input) {
       if (normalizedSub === 'disconnect') {
         const provider = normalizeProviderKey(secondArg);
         if (!provider || provider === 'local') {
-          console.log(`\n${PAD}${c.yellow}Usage: /connect disconnect <anthropic|openai|openrouter>${c.reset}\n`);
+          console.log(`\n${PAD}${c.yellow}Usage: /connect disconnect <anthropic|openai|openrouter|claude-code>${c.reset}\n`);
           return true;
         }
         const wasActiveProvider = (modelRegistry.getCurrentModel()?.provider || 'local') === provider;
@@ -2153,7 +2179,7 @@ async function handleCommand(input) {
       if (normalizedSub === 'use') {
         const provider = normalizeProviderKey(secondArg);
         if (!provider) {
-          console.log(`\n${PAD}${c.yellow}Usage: /connect use <local|anthropic|openai|openrouter>${c.reset}\n`);
+          console.log(`\n${PAD}${c.yellow}Usage: /connect use <local|anthropic|openai|openrouter|claude-code>${c.reset}\n`);
           return true;
         }
 
@@ -2178,7 +2204,7 @@ async function handleCommand(input) {
       if (!provider || provider === 'local') {
         console.log(`\n${PAD}${c.yellow}Usage:${c.reset}`);
         console.log(`${PAD}${c.dim}  /connect${c.reset}`);
-        console.log(`${PAD}${c.dim}  /connect <anthropic|openai|openrouter>${c.reset}`);
+        console.log(`${PAD}${c.dim}  /connect <anthropic|openai|openrouter|claude-code>${c.reset}`);
         console.log(`${PAD}${c.dim}  /connect status${c.reset}`);
         console.log(`${PAD}${c.dim}  /connect disconnect <provider>${c.reset}`);
         console.log(`${PAD}${c.dim}  /connect use <local|provider>${c.reset}\n`);
