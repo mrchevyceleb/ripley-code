@@ -5,6 +5,7 @@
 - Always provide complete, valid JSON in tool call arguments. Never use partial or malformed JSON.
 - When calling tools, provide ALL required arguments. Missing arguments cause failures.
 - After receiving a tool result, analyze it before deciding your next step.
+- If a command changes git state or the filesystem, verify the effect with a separate read-only check before you tell the user it is done.
 - Do not call the same tool with the same arguments twice in a row.
 - If a tool returns an error, try a different approach or explain the issue.
 - `run_command` uses cmd.exe on Windows, NOT PowerShell. Use cmd syntax (findstr, type, dir). For PowerShell, wrap it: `powershell -Command "..."`.

@@ -1,0 +1,12 @@
+hey!
+hey there!
+hey!
+how many tokens is the typical long sales page to build
+/clear
+/exit
+/connect status
+/model
+Read the files lib/agenticRunner.js, lib/lmStudio.js, and ripley.js, then list t...
+yeah summarize
+/model
+when i clear conversations it leaves a GIant GAP IN THE tui  │ Server *is* runni...

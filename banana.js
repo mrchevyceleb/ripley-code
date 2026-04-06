@@ -442,6 +442,15 @@ function initProject() {
   tokenCounter = new TokenCounter(config);
   imageHandler = new ImageHandler(projectDir);
 
+  const lastRunSnapshot = config.getRunSnapshot();
+  if (lastRunSnapshot && lastRunSnapshot.completed === false) {
+    const when = lastRunSnapshot.savedAt ? new Date(lastRunSnapshot.savedAt).toLocaleString() : 'recently';
+    console.log(`${PAD}${c.yellow}⚠ Previous run appears to have ended unexpectedly.${c.reset} ${c.dim}(${when})${c.reset}`);
+    if (lastRunSnapshot.userMessage) {
+      console.log(`${PAD}${c.dim}  Last request: ${String(lastRunSnapshot.userMessage).slice(0, 120)}${c.reset}`);
+    }
+  }
+
   // Initialize LM Studio + provider manager
   const lmStudioUrl = config.get('lmStudioUrl') || 'http://localhost:1234';
   lmStudio = new LmStudio({ baseUrl: lmStudioUrl });
@@ -1589,9 +1598,15 @@ async function handleCommand(input) {
       tokenCounter.resetSession();
       imageHandler.clearPending();
       setContextEstimate(0);
+      promptDuringWork = false;
+      renderWorkingPrompt = null;
+      if (rl) {
+        rl.write(null, { ctrl: true, name: 'u' });
+      }
       if (statusBar) {
+        statusBar.setInputHint('');
         statusBar.update({ sessionIn: 0, sessionOut: 0 });
-        statusBar.reinstall();
+        statusBar.uninstall();
       }
       console.clear();
       // Push cursor to bottom of scroll region so prompt isn't stranded at the top
@@ -1603,6 +1618,9 @@ async function handleCommand(input) {
         if (padding > 0) process.stdout.write('\n'.repeat(padding));
       }
       refreshIdleContextEstimate();
+      if (statusBar) {
+        statusBar.reinstall();
+      }
       if (rl) {
         rl.setPrompt(buildPromptPrefix());
         rl.prompt(false);
@@ -2684,9 +2702,19 @@ async function sendMessage(message) {
     fullMessage += '\n\n[Image analysis above is primary source of truth. Focus on image content, not file listing.]';
   }
 
+  config.saveRunSnapshot({
+    projectDir,
+    activeModel: modelRegistry.getCurrent(),
+    userMessage: message,
+    fullMessagePreview: fullMessage.slice(0, 2000),
+    conversationLength: conversationHistory.length
+  });
+
   try {
     await sendAgenticMessage(fullMessage, pendingImages, message);
+    config.completeRunSnapshot({ status: 'completed' });
   } catch (error) {
+    config.completeRunSnapshot({ status: 'failed', error: error.message });
     const provider = activeProviderKey();
     const providerLabel = providerManager.getProviderLabel(provider);
     console.log(`\n${PAD}${c.red}✗ Error: ${error.message}${c.reset}`);
@@ -2985,6 +3013,11 @@ async function sendStreamingMessage(message, images = [], rawMessage = '') {
 
   try {
     await streamHandler.handleStream(response);
+    const streamResult = streamHandler.getResult();
+    if (!streamResult.completed && streamResult.warning) {
+      fullResponse = `${streamResult.warning}\n\n${fullResponse}`.trim();
+      console.log(`\n${PAD}${c.yellow}⚠ ${streamResult.warning}${c.reset}`);
+    }
   } catch (error) {
     stopStatus();
     // Check if this was an abort
@@ -5172,10 +5205,12 @@ Examples:
   // then subsequent lines arrive as new 'line' events. We detect paste by
   // buffering lines that arrive within PASTE_DELAY_MS of each other.
   const PASTE_DELAY_MS = 400; // 400ms to handle large pastes and Windows Terminal dialog latency
+  const PASTE_STRAGGLER_WINDOW_MS = 1200; // Late lines can arrive after submit on Windows Terminal
   let pasteBuffer = [];
   let pasteTimer = null;
   let waitingForInput = false;
   let lastFlushTime = 0; // Track when paste buffer last flushed (to catch stragglers)
+  let lastPasteStragglerWarningAt = 0;
 
   showGeminiKeyPrompt = (callback) => {
     awaitingGeminiKey = true;
@@ -5342,13 +5377,17 @@ Examples:
         return;
       }
 
-      // Straggler paste lines: arrived after flush but within 2s and before AI started.
-      // This happens on Windows when the paste confirmation dialog adds latency between lines.
-      if (!currentAbortController && lastFlushTime && (Date.now() - lastFlushTime) < 2000) {
+      // Straggler paste lines: arrived after flush but before the paste has fully settled.
+      // On Windows Terminal, delayed lines can arrive after the first chunk was submitted,
+      // and without this guard they'd be misread as mid-turn steering.
+      if (lastFlushTime && (Date.now() - lastFlushTime) < PASTE_STRAGGLER_WINDOW_MS) {
         const trimmed = String(input || '').trim();
         if (trimmed) {
           appendDebugLog(`[paste-straggler] Dropped line arrived ${Date.now() - lastFlushTime}ms after flush: ${trimmed.slice(0, 60)}\n`);
-          console.log(`${PAD}${c.yellow}Lines were dropped from your paste.${c.reset} ${c.dim}Try pasting again, or disable the paste warning in Windows Terminal settings.${c.reset}`);
+          if (lastPasteStragglerWarningAt !== lastFlushTime) {
+            lastPasteStragglerWarningAt = lastFlushTime;
+            console.log(`${PAD}${c.yellow}Ignored delayed paste lines from the previous submission.${c.reset} ${c.dim}If this keeps happening, disable the Windows Terminal paste warning or paste again after the prompt settles.${c.reset}`);
+          }
         }
         return;
       }
@@ -5476,6 +5515,9 @@ process.on('SIGINT', () => {
   if (config && config.get('autoSaveHistory') && conversationHistory.length > 0) {
     config.saveConversation('autosave', conversationHistory);
   }
+  if (config) {
+    config.completeRunSnapshot({ status: 'cancelled' });
+  }
   if (watcher) watcher.stop();
   console.log(`\n${PAD}${c.cyan}👋 See you later!${c.reset}\n`);
   process.exit(0);
@@ -5484,6 +5526,12 @@ process.on('SIGINT', () => {
 main().catch(error => {
   logSessionEnd('crash', ` error=${error.message}`);
   if (statusBar) statusBar.uninstall();
+  if (config && config.get('autoSaveHistory') && conversationHistory.length > 0) {
+    config.saveConversation('autosave-crash', conversationHistory);
+  }
+  if (config) {
+    config.completeRunSnapshot({ status: 'crashed', error: error.message });
+  }
   console.error(`${c.red}Fatal error: ${error.message}${c.reset}`);
   if (watcher) watcher.stop();
   process.exit(1);

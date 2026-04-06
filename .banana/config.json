@@ -1,0 +1,25 @@
+{
+  "lmStudioUrl": "http://localhost:1234",
+  "compactMode": false,
+  "maxTokens": 32000,
+  "tokenWarningThreshold": 0.8,
+  "streamingEnabled": true,
+  "autoSaveHistory": true,
+  "historyLimit": 50,
+  "steeringEnabled": true,
+  "agenticMode": true,
+  "activeModel": "openai:codex-5.3-high",
+  "activePrompt": "base",
+  "mcpUrl": null,
+  "geminiApiKey": null,
+  "ignorePatterns": [
+    "node_modules/**",
+    ".git/**",
+    "dist/**",
+    "build/**",
+    ".next/**",
+    "coverage/**",
+    "*.lock",
+    "*.log"
+  ]
+}

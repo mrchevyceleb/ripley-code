@@ -14,7 +14,12 @@
     "package.json"
   ],
   "scripts": {
-    "postinstall": "node scripts/createBananaDir.js || echo banana: skipped dir creation"
+    "postinstall": "node scripts/createBananaDir.js || echo banana: skipped dir creation",
+    "test:tool-batch": "node scripts/regression-tool-batch-sanitizer.js",
+    "test:command-verification": "node scripts/regression-command-verification.js",
+    "test:stream-handler": "node scripts/regression-stream-handler.js",
+    "test:persistence-context": "node scripts/regression-persistence-context.js",
+    "test:reliability": "npm run test:tool-batch && npm run test:command-verification && npm run test:stream-handler && npm run test:persistence-context"
   },
   "keywords": [
     "ai",
