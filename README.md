@@ -1,5 +1,8 @@
 # Banana Code
 
+> Deprecation notice, May 6, 2026: this legacy single-file Node CLI is superseded by the Banana Code v2 fork in `mrchevyceleb/banana-code`.
+> New installs should use `npm i -g banana-code` from the new repo. This repository is kept only as a v1 reference and fallback during cutover.
+
 AI coding agent CLI powered by Monkey Models. Run cloud models with 4 quality tiers, or connect Anthropic/OpenAI/OpenRouter with `/connect`.
 
 ## What's New in v1.2.0
